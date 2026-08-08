@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from agentdeck.runtime.observability import trace_run
-from agentdeck.runtime.workspace import Workspace, current_capture
+from agentdeck.adapters.caps.sandbox import open_sandbox
+from agentdeck.runtime.observability import sandbox_trace_env, trace_run
 from agentdeck.workflows.nodes import STREAM_CONFIGURABLE_KEY
 from agentdeck.workflows.runners.base import BaseWorkflowRunner
 from agentdeck.workflows.state import coerce_input
@@ -22,17 +22,15 @@ class DevWorkflowRunner(BaseWorkflowRunner):
     """Compile-and-invoke driver — every node sees one shared workspace."""
 
     async def run(self, state: Any = None) -> Any:
-        # One root observation makes the whole graph run a single, session-tagged trace
-        # (every node's agent/skill spans nested under it) carrying its input/output.
+        # One root observation makes the whole graph run a single trace, every node's
+        # agent/skill spans nested under it, carrying its input/output. A run played through
+        # the Runtime is traced from the event stream instead; this is the direct-call path.
         initial = coerce_input(state, self.workflow.state)
-        with trace_run(
-            current_capture(),
-            name=self.workflow.name or self.workflow.__name__,
-            input=initial,
-        ) as tr:
-            async with Workspace.open(
+        with trace_run(name=self.workflow.name or self.workflow.__name__, input=initial) as tr:
+            async with open_sandbox(
                 environment=self.environment,
                 input_files=self.input_files,
+                trace_env=sandbox_trace_env,
             ):
                 result = await self.graph.ainvoke(initial, config=self.config)
                 tr.set_output(result)
@@ -46,14 +44,11 @@ class DevWorkflowRunner(BaseWorkflowRunner):
         """
         initial = coerce_input(state, self.workflow.state)
         final_state: Any = initial
-        with trace_run(
-            current_capture(),
-            name=self.workflow.name or self.workflow.__name__,
-            input=initial,
-        ) as tr:
-            async with Workspace.open(
+        with trace_run(name=self.workflow.name or self.workflow.__name__, input=initial) as tr:
+            async with open_sandbox(
                 environment=self.environment,
                 input_files=self.input_files,
+                trace_env=sandbox_trace_env,
             ):
                 # Tells a nested AgentNode (via get_config()) that it's safe to use run_streamed.
                 stream_config: RunnableConfig = {

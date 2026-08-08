@@ -36,8 +36,9 @@ def make_client(monkeypatch):
     """Factory of independent clients — the stability test needs two fresh ones in a row."""
     from fake_model import ScriptedProvider
     from fastapi.testclient import TestClient
+    from scripted_model import patch_provider
 
-    from agentdeck.runtime.checkpointer import _memory_saver
+    from agentdeck.adapters.engines.langgraph.checkpointer import _memory_saver
     from agentdeck.runtime.settings import PACKAGED_DEFAULT_YAML, reset_settings_cache
     from agentdeck.serve import create_app
 
@@ -48,7 +49,7 @@ def make_client(monkeypatch):
     # pinned to the shipped defaults as a belt-and-suspenders guard against either
     # appearing there later.
     monkeypatch.setenv("APP_CONFIG_PATH", str(PACKAGED_DEFAULT_YAML))
-    monkeypatch.setattr("agentdeck.agents.runners.base.OpenAIProvider", ScriptedProvider)
+    patch_provider(monkeypatch, ScriptedProvider)
     monkeypatch.chdir(FIXTURE_PROJECT)
 
     @contextmanager

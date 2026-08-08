@@ -8,12 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agents.sandbox.entries import BaseEntry, LocalDir
-from agents.sandbox.workspace_paths import SandboxPathGrant
-
+from agentdeck.adapters.caps.sandbox import input_file_targets, open_sandbox
+from agentdeck.core.ports.sandbox import require_sandbox
 from agentdeck.errors import SkillError
-from agentdeck.runtime.observability import RunTrace, init_observability, trace_run
-from agentdeck.runtime.workspace import Workspace, current_capture, input_file_entries
+from agentdeck.runtime.observability import RunTrace, init_observability, sandbox_trace_env, trace_run
 from agentdeck.skills.bundle import DEFAULT_ENTRY_SCRIPT, SkillBundle
 
 if TYPE_CHECKING:
@@ -134,37 +132,27 @@ class SkillExecutor:
             raise SkillEnvError(self.bundle.name, missing)
 
         mount = f"{_SKILLS_MOUNT_DIR}/{self.bundle.name}"
+        # Skill bundles live outside the SDK process cwd in most deploys (the catalog ships
+        # under the package install root); ``mount_dir`` grants the host path along with the
+        # mount. The bundle path is part of the application config, so it counts as trusted
+        # by definition.
         bundle_root = Path(self.bundle.path).resolve()
-        entries: list[tuple[Path, BaseEntry]] = [
-            (Path(mount), LocalDir(src=bundle_root)),
-            *input_file_entries(self.input_files),
-        ]
-        # Skill bundles live outside the SDK process cwd in most deploys
-        # (the catalog ships under the package install root). v0.17.0+
-        # requires explicit grants for ``LocalDir.src`` outside base_dir;
-        # the bundle path is part of the application config so it counts
-        # as trusted by definition.
-        bundle_grant = SandboxPathGrant(path=str(bundle_root), read_only=True)
 
         # One named span per skill run. Opened BEFORE the sandbox so the skill's own
-        # ``TRACEPARENT`` (captured in ``Workspace.open``) points here — the sandboxed
+        # ``TRACEPARENT`` (captured in ``open_sandbox``) points here — the sandboxed
         # LLM calls then nest under this skill span instead of floating up to the run
-        # root, and the trace shows *which* skill did the work. Passing the ambient capture
-        # re-affirms the session (idempotent under a run; it also tags a *standalone* skill
-        # run's trace, which would otherwise be session-less).
-        with trace_run(current_capture(), name=self.bundle.name, kind="tool", input=[str(a) for a in args]) as step:
-            async with Workspace.open(
-                environment=env,
-                extra_path_grants=(bundle_grant,),
-            ) as ws:
-                await ws.materialize(entries)
+        # root, and the trace shows *which* skill did the work.
+        with trace_run(name=self.bundle.name, kind="tool", input=[str(a) for a in args]) as step:
+            async with open_sandbox(environment=env, trace_env=sandbox_trace_env) as sandbox:
+                await sandbox.mount_dir(bundle_root, mount)
+                for target, content in input_file_targets(self.input_files):
+                    await sandbox.write_bytes(target, content)
                 script = f"{mount}/{self.bundle.scripts_dir.name}/{DEFAULT_ENTRY_SCRIPT}"
-                result = await ws.exec(
+                result = await sandbox.exec(
                     _PYTHON,
                     script,
                     *(str(a) for a in args),
                     timeout=timeout,
-                    shell=False,
                 )
             stdout, stderr = _decode(result.stdout), _decode(result.stderr)
             skill_result = SkillResult(
@@ -223,11 +211,11 @@ def _record_step(step: RunTrace, result: SkillResult) -> None:
 
 async def _read_artifact(path: str | Path) -> str:
     """Read a skill artefact path — host-absolute via the filesystem, otherwise
-    sandbox-relative via the active workspace."""
+    sandbox-relative via the active sandbox."""
     p = Path(str(path))
     if p.is_absolute():
         return p.read_text(encoding="utf-8")
-    return await Workspace.require().read_text(p)
+    return await require_sandbox().read_text(p)
 
 
 def parse_skill_outputs(stdout: str) -> Iterator[SkillOutput]:

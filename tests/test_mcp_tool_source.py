@@ -231,9 +231,7 @@ def test_the_v1_import_paths_re_export_the_relocated_objects():
     """``agentdeck.agents.mcp`` is a shim: same objects, so patching one patches both."""
     import agentdeck.agents as v1_agents
     import agentdeck.agents.mcp as v1_mcp
-    from agentdeck.agents.mcp.lifecycle import MCPLifecycle as ShimLifecycle
 
-    assert ShimLifecycle is MCPLifecycle
     assert v1_mcp.MCPLifecycle is MCPLifecycle
     assert v1_agents.MCPLifecycle is MCPLifecycle
     assert v1_mcp.mcp_status_banner is mcp_status_banner

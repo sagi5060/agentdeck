@@ -32,6 +32,12 @@ ENGINE_FOR_KIND: Final[Mapping[InvocableKind, str]] = {
     InvocableKind.WORKFLOW: "langgraph",
 }
 
+# Where a workflow's opt-in durability travels to the engine that acts on it: the langgraph
+# adapter reads ``spec.metadata[DURABLE_KEY]`` to decide whether to resolve the configured
+# checkpointer at all. Spelled out rather than imported, for the reason above; the same test
+# that pins the engine names pins this one to the adapter's own constant.
+DURABLE_KEY: Final[str] = "durable"
+
 
 class InvocableRegistry:
     """The one registry of what a project can run, built from its ``.agentdeck/`` bundles.
@@ -55,11 +61,26 @@ class InvocableRegistry:
         for name, agent in AgentRegistry(package).list(refresh=True).items():
             self._add(specs, name, InvocableKind.AGENT, agent.build())
         for name, workflow in WorkflowRegistry(package).list(refresh=True).items():
-            # uncompiled: the langgraph adapter compiles the graph itself, around its own checkpointer
-            self._add(specs, name, InvocableKind.WORKFLOW, workflow.build_graph())
+            # uncompiled: the langgraph adapter compiles the graph itself, around the checkpointer
+            # ``durable`` names — which is why that flag travels with the spec rather than staying
+            # on a class only v1 can see.
+            self._add(
+                specs,
+                name,
+                InvocableKind.WORKFLOW,
+                workflow.build_graph(),
+                metadata={DURABLE_KEY: workflow.durable},
+            )
         return specs
 
-    def _add(self, specs: dict[str, InvocableSpec], name: str, kind: InvocableKind, native: Any) -> None:
+    def _add(
+        self,
+        specs: dict[str, InvocableSpec],
+        name: str,
+        kind: InvocableKind,
+        native: Any,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         # Only catches a collision across kinds; a collision within one kind (two agent
         # bundles exporting the same class name) already raised inside the v1 scan that fed this.
         if name in specs:
@@ -73,7 +94,7 @@ class InvocableRegistry:
                 f"{kind.value} {name!r} needs engine {engine!r}, which is not registered. "
                 f"Registered: {sorted(self._engines)}."
             )
-        specs[name] = InvocableSpec(name=name, kind=kind, engine=engine, native=native)
+        specs[name] = InvocableSpec(name=name, kind=kind, engine=engine, native=native, metadata=metadata or {})
 
 
-__all__ = ["ENGINE_FOR_KIND", "InvocableRegistry"]
+__all__ = ["DURABLE_KEY", "ENGINE_FOR_KIND", "InvocableRegistry"]

@@ -36,16 +36,6 @@ def is_sandbox_tool(tool: FunctionTool) -> bool:
     return id(tool) in _SANDBOX_TOOL_IDS
 
 
-def mark_sandbox_tool(tool: FunctionTool) -> FunctionTool:
-    """Declare that ``tool`` should be wired up with a sandbox by the runner.
-
-    Used by test fixtures and skill-wrapping helpers in place of stamping a
-    private attribute on the SDK type — no ``# type: ignore[attr-defined]``.
-    """
-    _SANDBOX_TOOL_IDS.add(id(tool))
-    return tool
-
-
 class BaseAgent:
     """Declarative base for SDK :class:`Agent` instances.
 
@@ -317,4 +307,4 @@ class BaseSandboxAgent(BaseAgent):
         )
 
 
-__all__ = ["BaseAgent", "BaseSandboxAgent", "inner_agent_of", "is_sandbox_tool", "mark_sandbox_tool"]
+__all__ = ["BaseAgent", "BaseSandboxAgent", "inner_agent_of", "is_sandbox_tool"]

@@ -4,9 +4,9 @@ Relocated from ``agentdeck.runtime.checkpointer``, which was written for v1's
 ``BaseWorkflow`` durability but holds exactly the state a checkpointer engine must keep
 private to its own adapter (ADR-D5: execution state belongs to the engine that produced
 it, never shared or derived by an outer ring) — the same relationship ``sessions.py`` has
-to the openai-agents adapter. ``agentdeck.runtime.checkpointer`` is now a thin re-export
-so ``agentdeck.workflows.base`` (v1, frozen behavior) keeps working unchanged; nothing new
-imports that path. ``memory`` ships with core ``langgraph`` and needs nothing extra;
+to the openai-agents adapter. ``agentdeck.workflows.base`` (v1, frozen behavior) imports
+this module directly and translates its own ``CheckpointSettings`` into the plain
+``(backend, url)`` this function takes. ``memory`` ships with core ``langgraph`` and needs nothing extra;
 ``sqlite`` / ``postgres`` live in the optional ``[durability]`` extra
 (``langgraph-checkpoint-sqlite`` / ``langgraph-checkpoint-postgres``) and are imported
 lazily, only when actually requested, with a clear install hint if the extra is missing.

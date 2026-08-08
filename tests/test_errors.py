@@ -5,7 +5,7 @@ import textwrap
 
 import pytest
 from fastapi.testclient import TestClient
-from scripted_model import ScriptedModel, provider_of
+from scripted_model import ScriptedModel, patch_provider, provider_of
 
 from agentdeck.errors import AgentdeckError, ConfigError, NotFoundError, SkillError
 from agentdeck.runtime.registry import PluginRegistry
@@ -151,7 +151,7 @@ def test_skill_error_returns_500_without_leaking_stderr(project, monkeypatch):
     # The turn fails at the SDK boundary, so the error travels the whole real path — engine,
     # Runtime, surface — the way a failing tool or skill inside a turn does.
     model = ScriptedModel(raises=SkillExecutionError("greeter", 1, secret))
-    monkeypatch.setattr("agentdeck.agents.runners.base.OpenAIProvider", provider_of(model))
+    patch_provider(monkeypatch, provider_of(model))
 
     with TestClient(create_app()) as client:
         response = client.post("/agents/Greeter/chat", json={"session_id": "s", "message": "hi"})

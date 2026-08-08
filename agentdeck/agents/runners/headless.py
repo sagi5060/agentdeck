@@ -10,7 +10,6 @@ from agents import Runner, RunResult
 
 from agentdeck.agents.runners.base import BaseRunner
 from agentdeck.runtime.observability import trace_run
-from agentdeck.runtime.workspace import current_capture
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator
@@ -50,15 +49,13 @@ def _usage_of(result: Any) -> dict[str, int]:
 
 @dataclass(slots=True)
 class HeadlessRunner(BaseRunner):
-    """Single-invocation runner that inherits or opens a :class:`Workspace`."""
+    """Single-invocation runner that joins or opens a sandbox."""
 
     async def run(self, message: Any = None, *, session: Any = None) -> RunResult:
         # One root observation carries the turn's identity + input/output; OpenInference's
         # spans nest under it. Nested inside a workflow run, this becomes a child of the
         # workflow's root span, re-affirming the same session.
-        with trace_run(
-            current_capture(), name=self.agent.name, kind="agent", input=message, session_id=_session_id(session)
-        ) as tr:
+        with trace_run(name=self.agent.name, kind="agent", input=message, session_id=_session_id(session)) as tr:
             async with self.attach_sandbox():
                 result = await Runner.run(
                     self.agent,
@@ -83,9 +80,7 @@ class HeadlessRunner(BaseRunner):
         client disconnect, and without the cancel the turn would keep running while the
         sandbox is torn down under it.
         """
-        with trace_run(
-            current_capture(), name=self.agent.name, kind="agent", input=message, session_id=_session_id(session)
-        ) as tr:
+        with trace_run(name=self.agent.name, kind="agent", input=message, session_id=_session_id(session)) as tr:
             async with self.attach_sandbox():
                 result = Runner.run_streamed(
                     self.agent,

@@ -187,15 +187,6 @@ class OpenAISettings(LayeredSettings):
     base_url: str = Field(
         default="", description="OpenAI-compatible endpoint base URL. Empty uses the SDK default, api.openai.com."
     )
-    # Legacy OpenAI-native tracing key. Not read anywhere in the current codebase — host
-    # tracing runs through Langfuse/OpenInference (see runtime.observability) instead;
-    # kept as a config-file field for backward compatibility with anything still setting it.
-    tracing_api_key: str | None = Field(
-        default=None,
-        description="Legacy OpenAI-native tracing key. Not read anywhere in the current codebase — host "
-        "tracing runs through Langfuse/OpenInference (`agentdeck.runtime.observability`) instead; kept as a "
-        "field for backward compatibility with any config still setting it.",
-    )
     # Path to a CA/cert bundle used to verify the endpoint's TLS cert. Point it at a
     # corporate CA or a self-signed cert to reach an internal OpenAI-compatible server
     # *without* disabling verification. Empty => system default trust store.
@@ -395,8 +386,8 @@ class CheckpointSettings(LayeredSettings):
     ``backend`` picks the saver (``sqlite`` for dev, ``postgres`` for prod,
     ``memory`` for tests — never persists past the process); ``url`` is the
     sqlite file path or the Postgres DSN. Resolving the saver classes lives in
-    ``agentdeck.runtime.checkpointer`` — sqlite/postgres ship in the optional
-    ``[durability]`` extra, so this settings model stays import-free of them.
+    ``agentdeck.adapters.engines.langgraph.checkpointer`` — sqlite/postgres ship in the
+    optional ``[durability]`` extra, so this settings model stays import-free of them.
     """
 
     model_config = settings_config("AGENTDECK_CHECKPOINT_")

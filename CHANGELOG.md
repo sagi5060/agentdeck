@@ -16,6 +16,58 @@ of vanishing the moment the call returns.
 
 ### Changed
 
+- The Runtime now plays every turn on the real engine adapters — `OpenAIAgentsEngine` and
+  `LangGraphEngine` — instead of the v1 compatibility subclasses that stood in for them, and
+  `agentdeck.v1bridge` is removed. What a run is configured with (model provider, CA bundle,
+  temperature, turn and token caps, workflow name) is now resolved at the composition root
+  and handed to the adapter, so a caller can wire a different endpoint without touching
+  process state. Behavior is unchanged: the same settings resolve to the same run config,
+  pinned field by field by `tests/test_run_config_parity.py`.
+- A workflow's `durable = True` now travels to the engine on its spec, and the configured
+  checkpointer is built at the first durable run rather than when a Runtime is assembled —
+  so naming a `sqlite`/`postgres` backend still costs a project that only chats nothing, and
+  the `[durability]` extra stays optional.
+- **Breaking:** `App.session_for(session_id)` now returns the engine's own session for that
+  id, keyed by tenant (`local:<session_id>`) the way every other entry point already keys it.
+  One conversation is now one conversation whether the turn arrived through `App.chat` or
+  through HTTP — and a Redis-backed deployment gets its sessions on the Runtime path, which
+  it silently did not before. Conversations written under an unprefixed Redis key by an
+  earlier version are not read back; start them fresh or re-key them.
+- **Breaking:** `agentdeck.runtime` no longer re-exports `OpenAISettings`, `PluginRegistry`,
+  `RunnerSettings`, `Settings`, `SkillsSettings`, `Workspace`, `get_settings` or
+  `reset_settings_cache`. Import each from the module that defines it, e.g.
+  `from agentdeck.runtime.settings import get_settings`; nothing about how any of them
+  behaves changed. Part of the v3 cutover's prep to put a package-wide "`agentdeck.runtime`
+  stays adapter-free" import-linter contract on the whole package, rather than just today's
+  `service`/`dispatch` carve-out (`docs/delivery/plan-v2-cutover.md`).
+- **Breaking:** `agentdeck.runtime.sessions` and `agentdeck.runtime.checkpointer` (forwarders
+  left behind when `SessionFactory` and `resolve_checkpointer` relocated to their engine
+  adapters) are removed. Import `SessionFactory` from
+  `agentdeck.adapters.engines.openai_agents.sessions` and `resolve_checkpointer` from
+  `agentdeck.adapters.engines.langgraph.checkpointer`. `agentdeck.agents.mcp.lifecycle`, the
+  equivalent forwarder for `MCPLifecycle`, is removed the same way — import it from
+  `agentdeck.adapters.tools.mcp.lifecycle`.
+- **Breaking:** `OpenAISettings.tracing_api_key` (`OPENAI_TRACING_API_KEY`) is removed — it
+  was never read anywhere in the codebase.
+- **Breaking:** `agentdeck.runtime.workspace.runtime_capture` and `current_capture` are
+  removed. Nothing ever bound the ContextVar behind them, so `current_capture()` always
+  answered `None`; a run's identity now reaches telemetry through the event envelope.
+- **Breaking:** the sandbox is a port. `agentdeck.runtime.workspace` and its `Workspace` class
+  are removed, replaced by `SandboxPort` (`agentdeck.core.ports.sandbox`) and the
+  `agentdeck.adapters.caps.sandbox` adapter that implements it. Open one with
+  `async with open_sandbox(...) as sandbox:` instead of `Workspace.open(...)`, and reach the
+  ambient one with `require_sandbox()` instead of `Workspace.require()`. The port carries only
+  what callers actually use — `read_text`, `write_bytes`, `mount_dir`, `exec` — so
+  `write_text`, `write_output`, `read_output`, `output_path` and `OUTPUT_FILES_DIR` are gone
+  (nothing in the package or its tests called them), `exec` no longer takes `shell`, and
+  mounting a host directory now grants access to it in the same call rather than requiring a
+  separate `extra_path_grants=`. `materialize()` and `input_file_entries()`, which took the
+  Agents SDK's own manifest-entry types, are replaced by `mount_dir()` and
+  `input_file_targets()`; `Workspace.open`'s unused `capture`, `client` and `client_factory`
+  arguments are gone. A sandbox's environment is unchanged, including the rule that
+  host-supplied trace carriers win over a caller's stale copy.
+- An agent turn no longer opens its Langfuse observation inside the engine — the sink builds
+  the run's trace from its events instead, so a turn is reported once rather than twice.
 - **Breaking:** `App.run_agent` and `App.chat` no longer return the OpenAI Agents SDK's
   `RunResult`. Both return a `TurnResult` (`output`, `usage`, `run_id`, `session_id`) built
   from the run's own `run.completed` event. Update `result.final_output` to `result.output`;
@@ -49,6 +101,14 @@ of vanishing the moment the call returns.
 
 ### Added
 
+- **Langfuse now traces workflow runs.** `build_runtime` registers the Langfuse sink itself
+  when `AGENTDECK_LANGFUSE_PUBLIC_KEY` and `AGENTDECK_LANGFUSE_SECRET_KEY` are both set, so
+  every run played through a Runtime — workflow as well as agent — becomes a trace built from
+  the run's own events, carrying its session id, its principal as the Langfuse user, its
+  nodes, its tool calls and its token usage. Workflow runs previously produced either no trace
+  or an anonymous one. Nothing is registered and the Langfuse SDK is never imported without
+  both keys, so the `[observability]` extra stays optional. Pass `sinks=()` to `build_runtime`
+  to opt out.
 - **`App.store`**: the event log every recorded turn appends to. Read a turn back with
   `await app.store.read(log_key, ctx)`, where `log_key` is a `TurnResult`'s `session_id` (or
   `run_id`, for a session-less run).

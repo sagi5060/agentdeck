@@ -3,7 +3,7 @@
 Build the graph with LangGraph's :class:`StateGraph`; drop in
 :class:`SkillNode`, :class:`AgentNode`, or :class:`SandboxAgentNode`
 to give skills or agents a turn — they share the workflow's
-:class:`Workspace`. :class:`LoadFileNode` pulls a sandbox file back
+sandbox. :class:`LoadFileNode` pulls a sandbox file back
 into state. Call :func:`interrupt` in a node of a ``durable=True``
 workflow to pause for a human decision (see ``workflows.interrupts``),
 or :func:`sleep_until` to pause until a wall-clock moment

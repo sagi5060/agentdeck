@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
-from scripted_model import ScriptedModel, provider_of
+from scripted_model import ScriptedModel, patch_provider, provider_of
 
 from agentdeck.agents.runners.headless import HeadlessRunner, StreamDone
 
@@ -145,7 +145,7 @@ async def test_chat_returns_a_turn_result_not_the_sdks_runresult(project, monkey
     (issue #137) and returns a :class:`~agentdeck.app.TurnResult` assembled from the run's
     own ``run.completed`` — a caller depends on agentdeck's event schema, never on the SDK.
     """
-    monkeypatch.setattr("agentdeck.agents.runners.base.OpenAIProvider", provider_of(ScriptedModel(deltas=("echo:hi",))))
+    patch_provider(monkeypatch, provider_of(ScriptedModel(deltas=("echo:hi",))))
 
     result = await project.chat("Greeter", "s1", "hi")
 
@@ -161,7 +161,7 @@ async def test_chat_stream_uses_same_session_as_chat(project, monkeypatch):
     from agentdeck.core.events import RunCompleted
 
     model = ScriptedModel(deltas=("echo:hi",))
-    monkeypatch.setattr("agentdeck.agents.runners.base.OpenAIProvider", provider_of(model))
+    patch_provider(monkeypatch, provider_of(model))
 
     events = [event async for event in project.chat_stream("Greeter", "s1", "first")]
     result = await project.chat("Greeter", "s1", "second")
@@ -202,7 +202,7 @@ def serve_client(project, monkeypatch):
     from agentdeck.serve import create_app
 
     def _client(model):
-        monkeypatch.setattr("agentdeck.agents.runners.base.OpenAIProvider", provider_of(model))
+        patch_provider(monkeypatch, provider_of(model))
         # context manager runs the lifespan; without it every endpoint is 503
         return TestClient(create_app())
 

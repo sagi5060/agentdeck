@@ -594,14 +594,21 @@ class ControlPort(ABC):
     async def set_status(self, run_id: str, status: RunStatus) -> None: ...
 ```
 
-```python
-# core/ports/capabilities.py — caller-injected (§10); the sandbox is ONE implementation
-class FilesystemPort(ABC):
-    async def read_text(self, path: str, ctx: RunContext) -> str: ...
-    async def write_text(self, path: str, text: str, ctx: RunContext) -> None: ...
+*(Amended 2026-08-08, `docs/delivery/plan-v2-cutover.md` phase 3: shipped as one `SandboxPort`
+in `core/ports/sandbox.py`, not a `capabilities.py` holding a pre-split
+`FilesystemPort`/`TerminalPort`. Three consumers justify the seam; none of them needs half of it,
+and the openai-agents engine needs none of it — it takes the session as an opaque SDK handle off
+the adapter, so no port method describes it. `write_text`, `ApprovalPort` and per-call
+`RunContext` are absent for the same reason: nothing called them. Split when a consumer genuinely
+wants one half.)*
 
-class TerminalPort(ABC):
-    async def exec(self, cmd: list[str], ctx: RunContext) -> ExecResult: ...
+```python
+# core/ports/sandbox.py — caller-injected (§10); the sandbox is ONE implementation
+class SandboxPort(ABC):
+    async def read_text(self, path: str | Path, encoding: str = "utf-8") -> str: ...
+    async def write_bytes(self, path: str | Path, content: bytes) -> None: ...
+    async def mount_dir(self, src: Path, at: str | Path, *, read_only: bool = True) -> None: ...
+    async def exec(self, *cmd: str, timeout: float | None = None) -> ExecResult: ...
 
 class ApprovalPort(ABC):
     async def request(self, req: ApprovalRequest, ctx: RunContext) -> Decision: ...
@@ -892,7 +899,7 @@ signal` for free, because they too are event readers.
 agentdeck/
 ├── core/                    # Ring 1 — pydantic + stdlib ONLY (enforced by import-linter in CI)
 │   ├── events.py  content.py  context.py  invocable.py  status.py  errors.py
-│   └── ports/     engine.py  store.py  sink.py  control.py  capabilities.py  tools.py  policy.py  secrets.py
+│   └── ports/     engine.py  store.py  sink.py  control.py  sandbox.py  tools.py  policy.py  secrets.py
 ├── runtime/                 # use cases + discovery
 │   ├── service.py           # Runtime
 │   ├── discovery.py         # InvocableRegistry, over the same bundle conventions

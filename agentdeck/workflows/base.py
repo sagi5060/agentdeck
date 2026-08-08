@@ -11,8 +11,8 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from pydantic import BaseModel
 
+from agentdeck.adapters.engines.langgraph.checkpointer import resolve_checkpointer
 from agentdeck.errors import ConfigError
-from agentdeck.runtime.checkpointer import resolve_checkpointer
 from agentdeck.runtime.settings import get_settings
 from agentdeck.workflows.interrupts import INTERRUPT_KEY, InterruptResult, as_interrupt, interrupt_result
 from agentdeck.workflows.state import dump_state
@@ -34,16 +34,16 @@ class BaseWorkflow:
 
     Override :attr:`state` (a Pydantic model) and :meth:`build_graph`
     (returns an unbuilt ``StateGraph``). :meth:`run` opens one
-    :class:`Workspace` for the whole graph; all nodes — and any agents
-    they invoke — share that session via ``Workspace.require()``.
+    sandbox for the whole graph; all nodes — and any agents
+    they invoke — share that session via ``require_sandbox()``.
     """
 
     name: ClassVar[str] = ""
     description: ClassVar[str] = ""
     state: ClassVar[type]
     # Opt-in durability: compiles with a checkpointer (``AGENTDECK_CHECKPOINT_*``,
-    # see ``runtime.checkpointer``) so a run can resume by ``thread_id`` after the
-    # process dies. ``False`` (default) compiles exactly as before — no behavior change.
+    # see ``adapters.engines.langgraph.checkpointer``) so a run can resume by ``thread_id``
+    # after the process dies. ``False`` (default) compiles exactly as before — no behavior change.
     durable: ClassVar[bool] = False
 
     # ``cls.__dict__.get`` (vs. ``getattr``) prevents subclasses from
@@ -61,7 +61,8 @@ class BaseWorkflow:
         """Return the compiled graph, building (and caching) on first call."""
         if cls.__dict__.get("_compiled") is None:
             if cls.durable:
-                checkpointer = resolve_checkpointer(get_settings().checkpoint)
+                checkpoint = get_settings().checkpoint
+                checkpointer = resolve_checkpointer(checkpoint.backend, checkpoint.url)
                 cls._compiled = cls.build_graph().compile(checkpointer=checkpointer)
             else:
                 cls._compiled = cls.build_graph().compile()
@@ -198,7 +199,7 @@ class BaseWorkflow:
             args = json.loads(raw_args) if raw_args else {}
             if pinned:
                 args = {**args, **pinned}  # pinned values always win
-            # Through cls.run so the workflow inherits an active Workspace
+            # Through cls.run so the workflow inherits an active sandbox
             # from the calling agent.
             result = await cls.run(args)
             if keys is not None:

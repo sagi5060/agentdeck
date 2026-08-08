@@ -211,6 +211,38 @@ source_modules =
 forbidden_modules =
     langfuse
 
+# The sandbox as a capability adapter: it owns the SDK's sandbox client and core's port, so
+# `agents` is deliberately absent from the forbidden list — this directory is its second
+# licensed holder after the openai-agents engine, for the same reason (a sandbox session has to
+# be an SDK object to be attachable to an SDK run). `agentdeck.runtime` is absent too, and only
+# for `runtime/capture.py`: that module is the host↔sandbox env contract, and it is also copied
+# into sandbox venvs, so it cannot move under `core/` without following the skill runtime.
+# Everything else is barred, including `langfuse` — the trace env arrives as an injected
+# callable, so this adapter must never reach for the tracer itself.
+[importlinter:contract:sandbox-adapter-is-engine-free]
+name = the sandbox adapter imports core, the capture contract and the Agents SDK only
+type = forbidden
+source_modules =
+    agentdeck.adapters.caps
+forbidden_modules =
+    langgraph
+    fastapi
+    redis
+    psycopg
+    mcp
+    langfuse
+    agentdeck.adapters.control
+    agentdeck.adapters.engines
+    agentdeck.adapters.stores
+    agentdeck.adapters.telemetry
+    agentdeck.adapters.tools
+    agentdeck.agents
+    agentdeck.workflows
+    agentdeck.skills
+    agentdeck.surfaces
+    agentdeck.serve
+    agentdeck.app
+
 # The sink reads events and writes spans, nothing else: deleting this directory must cost
 # Langfuse traces and not one behavior more.
 [importlinter:contract:telemetry-adapter-is-engine-free]
@@ -224,6 +256,7 @@ forbidden_modules =
     fastapi
     redis
     psycopg
+    agentdeck.adapters.caps
     agentdeck.adapters.control
     agentdeck.adapters.engines
     agentdeck.adapters.stores
@@ -234,24 +267,3 @@ forbidden_modules =
     agentdeck.surfaces
     agentdeck.serve
     agentdeck.app
-
-# The v1 bridge (#74) is deliberately the one place that reaches across the line: it imports
-# v1's runner glue and v1's Langfuse integration, which is why it is not an adapter. Only the
-# composition root may wire it, so nothing in the rings depends on code the pre-stable cleanup
-# deletes — that is what makes deleting the whole directory a one-line change. Nothing else
-# earns this exemption by resembling it. `errors` is in the list for the same reason it has a
-# contract of its own: it is the one module every layer imports.
-[importlinter:contract:v1bridge-is-composition-root-only]
-name = only the composition root wires the v1 bridge
-type = forbidden
-source_modules =
-    agentdeck.errors
-    agentdeck.core
-    agentdeck.runtime
-    agentdeck.adapters
-    agentdeck.surfaces
-    agentdeck.agents
-    agentdeck.workflows
-    agentdeck.skills
-forbidden_modules =
-    agentdeck.v1bridge

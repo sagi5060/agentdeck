@@ -13,17 +13,17 @@ from agents import Agent, ModelSettings, OpenAIProvider, RunConfig
 from agents.sandbox import SandboxAgent
 from openai import AsyncOpenAI
 
+from agentdeck.adapters.caps.sandbox import UnixSandbox, open_sandbox
 from agentdeck.agents.base import inner_agent_of, is_sandbox_tool
-from agentdeck.runtime.observability import init_observability
+from agentdeck.runtime.observability import init_observability, sandbox_trace_env
 from agentdeck.runtime.settings import Settings, get_settings
-from agentdeck.runtime.workspace import Workspace
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
     from pathlib import Path
 
 
-def _default_use_responses() -> bool:
+def default_use_responses() -> bool:
     """Default to the SDK's Responses transport, overridable via env.
 
     Set ``OPENAI_USE_RESPONSES=false`` when targeting a Chat-Completions-
@@ -74,8 +74,8 @@ class BaseRunner(ABC):
         # Start Langfuse + OpenInference once (no-op when Langfuse is disabled) and let
         # its result drive the SDK's native tracing switch. When active, OpenInference
         # exports the Agents-SDK trace pipeline to Langfuse; when not, tracing is off (no
-        # OpenAI-backend export). Session identity is applied at run time by wrapping the
-        # run in :func:`observability.trace_run` — the capture may bind after this call.
+        # OpenAI-backend export). Session identity comes from the run's own trace: the
+        # telemetry sink for a run played through the Runtime, ``trace_run`` for a direct call.
         run_config = RunConfig(
             workflow_name=runner.workflow_name,
             model=openai.model,
@@ -95,7 +95,7 @@ class BaseRunner(ABC):
                 else None,
                 base_url=None if openai.ca_bundle else (openai.base_url or None),
                 api_key=None if openai.ca_bundle else (openai.api_key or None),
-                use_responses=_default_use_responses(),
+                use_responses=default_use_responses(),
             ),
             # ``include_usage`` asks the Chat-Completions API to emit the streaming usage
             # chunk (prompt/completion tokens) — without it, streamed turns land in Langfuse
@@ -118,22 +118,23 @@ class BaseRunner(ABC):
         self,
         *,
         manifest_root: Path | None = None,
-    ) -> AsyncGenerator[Workspace | None, None]:
-        """Open a workspace and bind it to ``run_config.sandbox`` if needed.
+    ) -> AsyncGenerator[UnixSandbox | None, None]:
+        """Open a sandbox and bind it to ``run_config.sandbox`` if needed.
 
         Opens when the top-level agent OR any direct handoff is a
         :class:`SandboxAgent` — the SDK requires ``run_config.sandbox``
         before any handoff target executes, not just for the first agent
         on the turn. No-op for graphs of plain :class:`Agent` only.
-        Inherits an outer workspace bound to the current async context.
+        Joins an outer sandbox bound to the current async context.
         """
-        if not _needs_sandbox(self.agent):
+        if not needs_sandbox(self.agent):
             yield None
             return
-        async with Workspace.open(
+        async with open_sandbox(
             environment=dict(self.environment),
             input_files=tuple(self.input_files),
             manifest_root=os.fspath(manifest_root) if manifest_root else None,
+            trace_env=sandbox_trace_env,
         ) as ws:
             self.run_config.sandbox = ws.sandbox_run_config
             yield ws
@@ -151,7 +152,7 @@ class BaseRunner(ABC):
         raise NotImplementedError(f"{type(self).__name__} does not support streaming")
 
 
-def _needs_sandbox(agent: Agent, _seen: set[int] | None = None) -> bool:
+def needs_sandbox(agent: Agent, _seen: set[int] | None = None) -> bool:
     """``True`` if ``agent`` or any reachable worker requires a sandbox.
 
     Walks both direct handoffs (Agent instances; Handoff wrappers don't expose
@@ -169,15 +170,15 @@ def _needs_sandbox(agent: Agent, _seen: set[int] | None = None) -> bool:
     if isinstance(agent, SandboxAgent):
         return True
     for entry in getattr(agent, "handoffs", ()) or ():
-        if isinstance(entry, Agent) and _needs_sandbox(entry, seen):
+        if isinstance(entry, Agent) and needs_sandbox(entry, seen):
             return True
     for tool in getattr(agent, "tools", ()) or ():
         if is_sandbox_tool(tool):
             return True
         inner = inner_agent_of(tool)
-        if isinstance(inner, Agent) and _needs_sandbox(inner, seen):
+        if isinstance(inner, Agent) and needs_sandbox(inner, seen):
             return True
     return False
 
 
-__all__ = ["BaseRunner"]
+__all__ = ["BaseRunner", "default_use_responses", "needs_sandbox"]

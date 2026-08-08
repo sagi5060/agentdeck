@@ -105,10 +105,16 @@ already designed · **P2** = designed at concept level, scheduled later.
 | Release | Contents | Gate |
 |---|---|---|
 | **M0 — Skeleton** | Schema v1, crude runtime + both engines, UC1–3 demos | falsifier review passes |
-| **v2.0 — Core epic** | FR-1/2/3/6–14, 22 · NFR-1–6 | epic demo: one agent, three surfaces, cross-process control |
-| **v2.1 — Batteries** | FR-24 stdlib + FR-23 eval harness + FR-4/5 | first eval-gated stdlib agents ship |
-| **v2.2 — Rooms & reach** | FR-15/16/17/18 + FR-20 triggers | group-session demo; partner A2A round-trip |
-| **v2.3 — Operate** | FR-25 console + FR-19/21 | console reads only the log (no new pathways) |
+| **v2.0 — Core epic** | FR-1/2/3/6–14, 22 · NFR-1–6 | epic demo: one agent, three surfaces, cross-process control · *tagged 2026-08-06* |
+| **v3.0 — One way to work** | No new FRs: v1's authoring surface and `App` are deleted, `authoring/` and `Deck` replace them, every adapter sits behind a port | `make check` green with no import-linter exemption; migration guide published |
+| **v3.1 — Batteries** | FR-24 stdlib + FR-23 eval harness + FR-4/5 | first eval-gated stdlib agents ship |
+| **v3.2 — Rooms & reach** | FR-15/16/17/18 + FR-20 triggers | group-session demo; partner A2A round-trip |
+| **v3.3 — Operate** | FR-25 console + FR-19/21 | console reads only the log (no new pathways) |
+
+**Amendment 2026-08-08.** A breaking release was inserted between v2.0 and the batteries,
+so the last three rows renumbered from v2.1/v2.2/v2.3 — contents unchanged. v3.0 carries no
+functional requirement of its own: it is the release that spends the breaking-change budget
+once, deliberately, so v3.x can be additive. See `delivery/plan-v2-cutover.md`.
 
 ## 7. Success metrics
 
@@ -116,6 +122,11 @@ Lines of user code for the reference claims system ≤ 100 (Appendix B target ~8
 Time-to-first-running-agent from install < 5 minutes. New protocol adapter ≤ 1 week and
 zero core diff. 100% of runs replayable; transcript-fidelity test green in CI
 continuously. Zero breaking changes experienced by v1.2.1 projects across v2.x.
+
+**Amendment 2026-08-08.** That last metric is retired, not missed: v3.0 deletes v1's public
+API by ruling (`delivery/plan-v2-cutover.md` ruling 1), so a v1.2.1 project migrates rather
+than upgrades. It is replaced by the same promise one major later — **zero breaking changes
+across v3.x**, which is what the v3.0 API freeze exists to make payable.
 
 ## 8. Out of scope (standing refusals)
 

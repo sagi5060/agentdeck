@@ -3,7 +3,7 @@
 Provenance on a skill-minted entity has two clearly separated owners:
 
 * **Who / which session** — ``session_id`` and ``author_id`` ride in from the
-  Workspace-injected :data:`CAPTURE_ENV`. Built host-side, so a skill can neither
+  sandbox-injected :data:`CAPTURE_ENV`. Built host-side, so a skill can neither
   forge nor supply them. The skill never sets these.
 * **Role and why** — ``actor`` and ``rationale`` belong to the *flow*. A skill sets
   ``actor`` to the role that produced *this* entity (``SYSTEM`` for an automatic

@@ -1,6 +1,11 @@
-"""trace_run session identity: a spy OTel exporter, no live Langfuse backend."""
+"""trace_run session identity: a spy OTel exporter, no live Langfuse backend.
 
-import textwrap
+``trace_run`` traces a *direct* call now — ``BaseWorkflow.run``, a standalone skill. A run
+played through the Runtime is traced from its events by the telemetry sink instead, so what
+that path promises is asserted against the sink (``tests/test_langfuse_sink.py``) and against
+the composition root that wires it (``tests/test_composition.py``).
+"""
+
 import uuid
 
 import pytest
@@ -13,13 +18,6 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, Sp
 from agentdeck.runtime import observability  # noqa: E402
 from agentdeck.runtime.capture import Capture, CaptureActor  # noqa: E402
 from agentdeck.runtime.observability import trace_run  # noqa: E402
-
-AGENT_PY = """
-from agentdeck.agents import BaseAgent
-
-class Greeter(BaseAgent):
-    instructions = "Greet the user."
-"""
 
 
 class SpyExporter(SpanExporter):
@@ -111,32 +109,3 @@ def test_nested_run_does_not_repropagate_identity(spy):
     root, nested = spy.spans[1], spy.spans[0]
     assert _attr(root, "session.id") == "wa-123"
     assert _attr(nested, "session.id") == "wa-123"
-
-
-async def test_app_chat_turn_produces_root_trace_with_chat_session_id(spy, tmp_path, monkeypatch):
-    """End-to-end: App.chat(..., session_id=...) reaches the root trace via the Runtime's
-    V1CompatEngine. Stubs the SDK boundary the same way tests/test_app.py does (a scripted
-    model behind v1's own ``OpenAIProvider``) rather than a runner method, because the
-    Runtime always drives ``Runner.run_streamed`` — never the non-streamed ``Runner.run`` —
-    regardless of whether the caller wants a stream.
-    """
-    import sys
-
-    from scripted_model import ScriptedModel, provider_of
-
-    root = tmp_path / ".agentdeck"
-    (root / "agents" / "greeter").mkdir(parents=True)
-    (root / "agents" / "greeter" / "agent.py").write_text(textwrap.dedent(AGENT_PY))
-    monkeypatch.chdir(tmp_path)
-    for mod in [m for m in sys.modules if m.startswith("agentdeck_project")]:
-        del sys.modules[mod]
-    from agentdeck import App
-
-    monkeypatch.setattr("agentdeck.agents.runners.base.OpenAIProvider", provider_of(ScriptedModel(deltas=("echo:hi",))))
-
-    app = App()
-    result = await app.chat("Greeter", "wa-123", "hi")
-
-    assert result.output == "echo:hi"
-    (span,) = spy.spans
-    assert _attr(span, "session.id") == "wa-123"

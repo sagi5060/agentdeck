@@ -159,10 +159,14 @@ async def test_a_function_tool_reports_through_the_sdk_context() -> None:
     # way; if this list ever changes, the drain's granularity changed with it.
     assert [event.kind for event in events] == [
         "run.started",
+        # One per finished model call, which is what makes two turns visible as two: the
+        # terminal event's usage is the turn's cumulative total and cannot tell them apart.
+        "usage.reported",
         "status.reported",
         "progress.reported",
         "tool.call.started",
         "tool.call.completed",
+        "usage.reported",
         "message.completed",
         "run.completed",
     ]

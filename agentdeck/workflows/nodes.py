@@ -10,16 +10,18 @@ from typing import Any, cast
 
 from langgraph.config import get_config, get_stream_writer
 
+from agentdeck.adapters.engines.langgraph.engine import STREAM_CONFIGURABLE_KEY
 from agentdeck.agents.base import BaseAgent, BaseSandboxAgent
 from agentdeck.agents.runners.headless import HeadlessRunner, StreamDone
+from agentdeck.core.ports.sandbox import require_sandbox
 from agentdeck.runtime.settings import get_settings
-from agentdeck.runtime.workspace import Workspace
 from agentdeck.skills import SkillBundle, SkillExecutionError, SkillExecutor, SkillOutputSchema, SkillResult
 
 logger = logging.getLogger(__name__)
 
-# Set by DevWorkflowRunner.run_stream(); unset under run()/ainvoke(), which stay on Runner.run.
-STREAM_CONFIGURABLE_KEY = "agentdeck_stream"
+# Set by the langgraph engine on every run it drives, and by DevWorkflowRunner.run_stream();
+# unset under run()/ainvoke(), which stay on Runner.run. Imported from the engine that owns it
+# rather than redeclared, so the two cannot name the channel differently.
 
 ArgvBuilder = Callable[[Any], Sequence[str | Path]]
 StateUpdate = Callable[[Any, SkillResult], Awaitable[dict[str, Any]] | dict[str, Any]]
@@ -105,7 +107,7 @@ class LoadFileNode:
 
     ``path(state)`` returns the file path or ``None`` (no-op so the node can
     sit downstream of optional stages). Absolute paths read the host fs
-    directly; relative paths go through the active :class:`Workspace`.
+    directly; relative paths go through the active sandbox.
     """
 
     __slots__ = ("path", "into", "parse")
@@ -135,7 +137,7 @@ class LoadFileNode:
         if target_path.is_absolute():
             text = target_path.read_text(encoding="utf-8")
         else:
-            text = await Workspace.require().read_text(str(target_path))
+            text = await require_sandbox().read_text(str(target_path))
         return {self.into: self.parse(text) if self.parse else text}
 
 

@@ -8,7 +8,6 @@ openai:
   api_key: ""
   base_url: ""          # empty => SDK default (api.openai.com)
   model: gpt-4.1-mini
-  tracing_api_key: null
 
 runner:
   workflow_name: agentdeck

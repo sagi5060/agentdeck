@@ -12,7 +12,6 @@ from agentdeck.agents.base import BaseAgent, BaseSandboxAgent
 from agentdeck.agents.registry import AgentRegistry
 from agentdeck.agents.subagents import _depth, spawn_subagent_tool
 from agentdeck.errors import NotFoundError
-from agentdeck.runtime.workspace import Workspace
 
 
 class Worker(BaseAgent):
@@ -139,11 +138,13 @@ def test_spawning_sandbox_agent_triggers_attach_sandbox(monkeypatch):
     opened = []
 
     @asynccontextmanager
-    async def fake_open(cls, **kwargs):
+    async def fake_open(**kwargs):
         opened.append(kwargs)
         yield SimpleNamespace(sandbox_run_config="fake-sandbox-config")
 
-    monkeypatch.setattr(Workspace, "open", classmethod(fake_open))
+    # Patched where the runner looks it up: the opener is a module-level function, so the
+    # runner's own binding is the one that has to be replaced.
+    monkeypatch.setattr("agentdeck.agents.runners.base.open_sandbox", fake_open)
 
     async def fake_run(agent, message, *, run_config, max_turns, session=None):
         assert run_config.sandbox == "fake-sandbox-config"  # attach_sandbox wired it in first
@@ -155,7 +156,7 @@ def test_spawning_sandbox_agent_triggers_attach_sandbox(monkeypatch):
     result = _invoke(tool, "Worker", "do sandboxed thing")
 
     assert result == "sandboxed result"
-    assert opened  # Workspace.open was entered -> _needs_sandbox's isinstance(SandboxAgent) branch fired
+    assert opened  # open_sandbox was entered -> _needs_sandbox's isinstance(SandboxAgent) branch fired
 
 
 def test_spawn_subagent_tool_defaults_to_project_registry():

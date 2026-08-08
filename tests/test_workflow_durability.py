@@ -197,8 +197,7 @@ def test_postgres_resolves_the_async_saver(monkeypatch):
     import sys
     import types
 
-    from agentdeck.runtime.checkpointer import resolve_checkpointer
-    from agentdeck.runtime.settings import CheckpointSettings
+    from agentdeck.adapters.engines.langgraph.checkpointer import resolve_checkpointer
 
     class StubSaver:
         def __init__(self):
@@ -226,23 +225,22 @@ def test_postgres_resolves_the_async_saver(monkeypatch):
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", aio_mod)
 
     # unique DSN defeats _postgres_saver's @cache across test runs
-    saver = resolve_checkpointer(CheckpointSettings(backend="postgres", url="postgresql://stub/wiring-test"))
+    saver = resolve_checkpointer("postgres", "postgresql://stub/wiring-test")
 
     assert saver is stub_instance
     assert stub_instance.setup_awaited
 
 
 def test_postgres_without_url_raises():
-    from agentdeck.runtime.checkpointer import resolve_checkpointer
-    from agentdeck.runtime.settings import CheckpointSettings
+    from agentdeck.adapters.engines.langgraph.checkpointer import resolve_checkpointer
 
     with pytest.raises(ValueError, match="DSN"):
-        resolve_checkpointer(CheckpointSettings(backend="postgres", url=""))
+        resolve_checkpointer("postgres", "")
 
 
 def test_run_sync_propagates_exceptions_from_inside_a_loop():
     """A failing bootstrap coroutine must surface its real error, not IndexError."""
-    from agentdeck.runtime.checkpointer import _run_sync
+    from agentdeck.adapters.engines.langgraph.checkpointer import _run_sync
 
     async def _boom():
         raise RuntimeError("real cause")

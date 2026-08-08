@@ -12,20 +12,21 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
-from contextlib import aclosing, asynccontextmanager
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from agents import Agent, RunConfig, Runner
+from agents import Agent, Runner
 from pydantic import BaseModel
 
 from agentdeck.adapters.engines.openai_agents.reconcile import reconcile
+from agentdeck.adapters.engines.openai_agents.runconfig import RunSettings, build_run_config
 from agentdeck.adapters.engines.openai_agents.sessions import ExecutionStore
 from agentdeck.adapters.engines.openai_agents.translate import translate
 from agentdeck.core.content import DataBlock, TextBlock, coerce_input
 from agentdeck.core.control import ControlSignalled
-from agentdeck.core.events import RunCompleted, Usage
+from agentdeck.core.events import Custom, RunCompleted, Usage, UsageReported
 from agentdeck.core.ports import EnginePort
 from agentdeck.errors import ConfigError
 
@@ -40,6 +41,23 @@ if TYPE_CHECKING:
     from agentdeck.core.context import RunContext
     from agentdeck.core.events import Event, KnownPayload
     from agentdeck.core.invocable import InvocableSpec
+
+STRUCTURED_OUTPUT = "openai_agents.structured_output"
+"""Where an ``output_type`` agent's validated result travels *in addition to*
+``RunCompleted.output``.
+
+Redundant by construction — the same object rides the terminal event as a ``DataBlock`` — and
+kept anyway, because ``surfaces/serve/compat.py`` reads this event to build v1's ``done``
+frame. Retiring it moves that wire, which is a change of its own rather than a side effect
+of this one (D10: an engine namespaces a ``custom`` event, it never mints a kind)."""
+
+SandboxScope = Callable[[Agent[Any]], AbstractAsyncContextManager[Any]]
+"""How this engine opens whatever sandbox an agent needs: given the agent, a scope yielding
+the SDK ``sandbox`` handle for its run (or ``None``).
+
+Injected rather than built here because a sandbox is a capability, not an engine concern —
+it becomes a port of its own in the next slice. Unset means no agent in this project needs
+one, which is every code-first caller until it says otherwise."""
 
 
 @dataclass(slots=True)
@@ -67,16 +85,25 @@ class Launch:
 class OpenAIAgentsEngine(EnginePort):
     """Plays ``spec.native`` (an ``agents.Agent``) through ``Runner.run_streamed``.
 
-    Four protected seams exist for the v1 bridge in ``agentdeck/v1bridge/engine.py``, which needs a
-    differently-configured run and a v1-shaped result but the same stream handling:
-    :meth:`_session` picks the execution state, :meth:`_launch` starts the SDK run,
-    :meth:`_translate` maps one stream event, and :meth:`_terminal` closes the run.
+    Everything a run is configured with arrives here already resolved — ``sessions`` is the
+    conversation memory (Redis-backed or local), ``settings`` the endpoint and limits, and
+    ``sandbox`` the scope an agent that needs one runs inside. All three default to the
+    SDK's own behavior, so ``OpenAIAgentsEngine()`` still runs an agent that configured
+    itself.
     """
 
     engine: ClassVar[str] = "openai-agents"
 
-    def __init__(self, sessions: ExecutionStore | None = None) -> None:
+    def __init__(
+        self,
+        sessions: ExecutionStore | None = None,
+        *,
+        settings: RunSettings | None = None,
+        sandbox: SandboxScope | None = None,
+    ) -> None:
         self._sessions = sessions or ExecutionStore()
+        self._settings = settings or RunSettings()
+        self._sandbox = sandbox
 
     async def start(
         self,
@@ -138,31 +165,39 @@ class OpenAIAgentsEngine(EnginePort):
     ) -> AsyncIterator[Launch]:
         """Start the run and hold whatever scope it needs open until the stream is drained.
 
-        Lifecycle an override must respect: **code after the ``yield`` may never run.** A
-        successful run ends with the Runtime breaking on the terminal event, which closes this
-        generator — the ``yield`` raises ``GeneratorExit`` and the lines below it are skipped.
-        Anything that must happen once per finished run therefore belongs in the
-        ``GeneratorExit`` path, keyed on ``Launch.finished``, never only after the ``yield``.
+        Lifecycle rule: **code after the ``yield`` may never run.** A successful run ends
+        with the Runtime breaking on the terminal event, which closes this generator — the
+        ``yield`` raises ``GeneratorExit`` and the lines below it are skipped. Anything that
+        must happen once per finished run therefore belongs in the ``GeneratorExit`` path,
+        keyed on ``Launch.finished``, never only after the ``yield``.
         """
-        yield Launch(
-            Runner.run_streamed(
-                agent,
-                message,
-                # The run context travels as the SDK's own context object, which is the one thing
-                # the SDK hands a function tool: a tool declaring ``RunContextWrapper[RunContext]``
-                # reaches ``wrapper.context.reporter`` (and the gate) without importing a Runtime.
-                # Nothing in the SDK reads it — it is opaque to the run loop by design.
-                context=ctx,
-                session=session,
-                run_config=RunConfig(tracing_disabled=not _tracing_enabled()),
+        scope = self._sandbox(agent) if self._sandbox is not None else nullcontext(None)
+        async with scope as sandbox:
+            yield Launch(
+                Runner.run_streamed(
+                    agent,
+                    message,
+                    # The run context travels as the SDK's own context object, which is the one thing
+                    # the SDK hands a function tool: a tool declaring ``RunContextWrapper[RunContext]``
+                    # reaches ``wrapper.context.reporter`` (and the gate) without importing a Runtime.
+                    # Nothing in the SDK reads it — it is opaque to the run loop by design.
+                    context=ctx,
+                    session=session,
+                    run_config=build_run_config(self._settings, sandbox=sandbox),
+                    max_turns=self._settings.max_turns,
+                )
             )
-        )
 
     def _translate(self, event: Any, tool_names: dict[str, str]) -> KnownPayload | None:
-        return translate(event, tool_names)
+        payload = translate(event, tool_names)
+        return payload if payload is not None else _usage_reported(event)
 
     def _terminal(self, result: RunResultStreaming) -> Sequence[KnownPayload]:
-        return (_run_completed(result),)
+        completed = _run_completed(result)
+        structured = [block.data for block in completed.output if isinstance(block, DataBlock)]
+        if not structured:
+            return (completed,)
+        return (Custom(name=STRUCTURED_OUTPUT, data={"output": structured[0]}), completed)
 
     async def resume(
         self,
@@ -178,17 +213,23 @@ class OpenAIAgentsEngine(EnginePort):
         yield  # pragma: no cover — makes this an async generator; never reached
 
 
-def _tracing_enabled() -> bool:
-    """Opt-in switch for the SDK's default trace exporter (issue #61).
+def _usage_reported(event: Any) -> KnownPayload | None:
+    """One finished model call → one ``usage.reported``.
 
-    Off by default: a keyless/fake-model run (tests, CI, the M0 demo) has no OpenAI
-    account to export traces to, and the SDK's exporter otherwise attempts a real HTTPS
-    call on every run, logging a non-fatal ``Tracing client error 401``. Set
-    ``AGENTDECK_OPENAI_AGENTS_TRACING_ENABLED=true`` to restore it for a deployment that
-    wants the SDK's own trace export (as opposed to v1's Langfuse/OpenInference route).
+    The terminal event's ``usage`` is the SDK's cumulative total for the turn, so without
+    this a consumer cannot tell one model call from four — which is exactly what v1's
+    ``usage.requests`` counted.
     """
-    raw = os.environ.get("AGENTDECK_OPENAI_AGENTS_TRACING_ENABLED")
-    return raw is not None and raw.strip().lower() in {"1", "true", "yes", "on"}
+    if event.type != "raw_response_event" or getattr(event.data, "type", None) != "response.completed":
+        return None
+    response = event.data.response
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    return UsageReported(
+        model=str(getattr(response, "model", "") or ""),
+        usage=Usage(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens),
+    )
 
 
 def _agent_of(spec: InvocableSpec) -> Agent[Any]:
@@ -242,4 +283,4 @@ def _usage_of(result: RunResultStreaming) -> Usage:
     return Usage(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
 
 
-__all__ = ["Launch", "OpenAIAgentsEngine"]
+__all__ = ["STRUCTURED_OUTPUT", "Launch", "OpenAIAgentsEngine", "SandboxScope"]

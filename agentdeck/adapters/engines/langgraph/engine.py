@@ -26,22 +26,26 @@ shallow-merge every ``node.updated`` promises its readers.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Mapping
-from contextlib import aclosing
+from contextlib import aclosing, nullcontext
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.state import StateGraph
 from langgraph.types import Command
+from pydantic import BaseModel
 
+from agentdeck.adapters.engines.langgraph.checkpointer import resolve_checkpointer
 from agentdeck.core.content import DataBlock, TextBlock
 from agentdeck.core.events import Custom, NodeUpdated, RunCompleted, RunInterrupted, Usage
 from agentdeck.core.ports import EnginePort
 from agentdeck.errors import ConfigError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+    from contextlib import AbstractAsyncContextManager
 
     from langchain_core.runnables import RunnableConfig
     from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -55,6 +59,23 @@ if TYPE_CHECKING:
 
 _INTERRUPT_KEY = "__interrupt__"
 _KNOWN_REASONS = frozenset({"human", "pause", "approval"})
+
+DURABLE_KEY = "durable"
+"""``spec.metadata[DURABLE_KEY]``: whether this workflow's state must outlive the process.
+
+Absent — a spec built in code that never said — leaves the engine's own default checkpointer
+in place, which is what a caller wiring ``LangGraphEngine()`` by hand already gets. ``True``
+is what makes the configured (sqlite/postgres) checkpointer be resolved *at all*, and only at
+the first durable run, so the ``[durability]`` extra stays optional for a project that only
+chats."""
+
+STREAM_CONFIGURABLE_KEY = "agentdeck_stream"
+"""``config["configurable"][STREAM_CONFIGURABLE_KEY]``: this run's nodes may stream.
+
+A node that drives an agent of its own checks this before using the SDK's streaming API, so
+without it a nested agent's text deltas never reach the custom stream. Always on here, unlike
+v1's opt-in: one run produces one canonical stream, and what a consumer does with it is not
+the engine's business."""
 
 REPORTER_KEY = "reporter"
 """Where a node finds this run's ``Reporter``: ``config["configurable"]["reporter"]``.
@@ -83,18 +104,29 @@ STREAM_WRITE_KEY = "value"
 class LangGraphEngine(EnginePort):
     """Plays ``spec.native`` (an uncompiled ``StateGraph``) through ``astream``.
 
-    One checkpointer for every graph this instance ever plays — a fresh in-memory one by
-    default, or a durable one (sqlite/postgres, via ``checkpointer.py``'s
-    ``resolve_checkpointer``) passed in explicitly. Mirrors ``OpenAIAgentsEngine``'s
-    ``sessions: ExecutionStore | None`` constructor shape, and, unlike
-    ``resolve_checkpointer("memory")``, is never shared with another engine instance — two
-    engines must not silently see each other's threads.
+    ``checkpointer`` is what a non-durable graph compiles around — a fresh in-memory one by
+    default, never ``resolve_checkpointer("memory")``'s shared instance, because two engines
+    must not silently see each other's threads. ``durable_checkpoint`` is the
+    ``(backend, url)`` a ``durable`` workflow gets instead, resolved from settings at the
+    composition root but built here, lazily, at the first durable run: naming a backend must
+    not cost a project that only chats the ``[durability]`` extra.
+
+    ``workspace`` is the scope a run's nodes execute inside — injected, because a sandbox is
+    a capability rather than an engine concern, and unset for a project whose nodes need none.
     """
 
     engine: ClassVar[str] = "langgraph"
 
-    def __init__(self, checkpointer: BaseCheckpointSaver | None = None) -> None:
+    def __init__(
+        self,
+        checkpointer: BaseCheckpointSaver | None = None,
+        *,
+        durable_checkpoint: tuple[str, str] | None = None,
+        workspace: Callable[[], AbstractAsyncContextManager[Any]] | None = None,
+    ) -> None:
         self._checkpointer = checkpointer or MemorySaver()
+        self._durable_checkpoint = durable_checkpoint
+        self._workspace = workspace
         self._compiled: dict[str, CompiledStateGraph[Any, Any, Any, Any]] = {}
 
     async def start(
@@ -106,8 +138,8 @@ class LangGraphEngine(EnginePort):
     ) -> AsyncGenerator[KnownPayload, None]:
         # aclosing at every delegation: closing an async generator unwinds its own frame only,
         # so an inner one iterated with a bare `async for` is abandoned to the GC — which
-        # finalizes it in a fresh context, where a ContextVar reset (the sandbox scope v1's
-        # bridge opens) raises instead of releasing.
+        # finalizes it in a fresh context, where a ContextVar reset (the workspace scope
+        # ``_drive`` opens) raises instead of releasing.
         async with aclosing(self._drive(spec, _to_graph_input(input), self._thread_id(ctx), ctx)) as stream:
             async for payload in stream:
                 yield payload
@@ -124,13 +156,14 @@ class LangGraphEngine(EnginePort):
                 yield payload
 
     def _thread_id(self, ctx: RunContext) -> str:
-        """Which langgraph thread this run plays on: its own.
+        """Which langgraph thread this run plays on: the session's, or its own.
 
-        A resume always names the same thread back via the ``RunInterrupted`` it got, so
-        reusing ``ctx.run_id`` needs no separate id-minting step. v1's bridge overrides this,
-        because v1's caller names the thread itself and expects to keep resuming it.
+        A caller that names the thread keeps resuming it — ``POST /workflows/X?thread_id=t``
+        then ``POST /workflows/X/t/resume`` is two runs on one thread, which ``ctx.run_id``
+        could not express. A run with no session falls back to its own id, which a resume
+        names back via the ``RunInterrupted`` it got.
         """
-        return ctx.run_id
+        return ctx.session_id or ctx.run_id
 
     async def _drive(
         self,
@@ -139,15 +172,35 @@ class LangGraphEngine(EnginePort):
         thread_id: str,
         ctx: RunContext,
     ) -> AsyncGenerator[KnownPayload, None]:
-        """Play ``graph_input`` on ``spec``'s graph — the seam v1's bridge wraps to add the
-        sandbox scope and trace span v1 runs a workflow inside.
+        """Play ``graph_input`` on ``spec``'s graph, inside whatever scope its nodes need.
 
-        The one place the config is built, so ``start``, ``resume`` and v1's bridge all hand a
-        node the same reporter without any of them mentioning it.
+        The one place the config is built, so ``start`` and ``resume`` hand a node the same
+        reporter and the same streaming permission without either of them mentioning it.
         """
-        config: RunnableConfig = {"configurable": {"thread_id": thread_id, REPORTER_KEY: ctx.reporter}}
-        async with aclosing(self._play(self._graph_for(spec), graph_input, config)) as stream:
+        durable = spec.metadata.get(DURABLE_KEY)
+        if durable is True and ctx.session_id is None:
+            # A durable graph loads and persists its state by thread, so running one under a
+            # thread nobody can name back is a lost run.
+            raise ValueError(
+                f"{spec.name} is durable=True; a thread_id is required to load/persist checkpointed state.",
+            )
+        config: RunnableConfig = {
+            "configurable": {
+                "thread_id": thread_id,
+                REPORTER_KEY: ctx.reporter,
+                STREAM_CONFIGURABLE_KEY: True,
+            }
+        }
+        # The workspace is a ContextVar scope, so the stream it wraps has to be closed from
+        # inside it — an abandoned generator releases it from the wrong context.
+        scope = self._workspace() if self._workspace is not None else nullcontext(None)
+        async with scope, aclosing(self._play(self._graph_for(spec), graph_input, config)) as stream:
             async for payload in stream:
+                if isinstance(payload, RunInterrupted) and durable is False:
+                    raise ConfigError(
+                        f"{spec.name} called interrupt() but is durable=False: with no checkpointer "
+                        "the paused run cannot be resumed. Set `durable = True` on the workflow.",
+                    )
                 yield payload
 
     def _graph_for(self, spec: InvocableSpec) -> CompiledStateGraph[Any, Any, Any, Any]:
@@ -157,9 +210,32 @@ class LangGraphEngine(EnginePort):
                 raise ConfigError(
                     f"{spec.name!r} has no langgraph StateGraph: expected native=StateGraph, got {type(spec.native)}"
                 )
-            compiled = spec.native.compile(checkpointer=self._checkpointer)
+            compiled = spec.native.compile(checkpointer=self._checkpointer_for(spec))
             self._compiled[spec.name] = compiled
         return compiled
+
+    def _checkpointer_for(self, spec: InvocableSpec) -> BaseCheckpointSaver | None:
+        """This graph's checkpointer. Three answers, because ``durable`` has three states.
+
+        Declared ``False`` means **no checkpointer at all** — not an in-memory one. A saver
+        keyed by thread would make a second run on a thread resume the first's state instead
+        of starting fresh, which is the opposite of what a workflow declaring itself
+        non-durable asked for.
+
+        Absent is not the same as ``False``: a spec built in code never said, so it keeps the
+        engine's own default (see ``DURABLE_KEY``), which is what a hand-wired
+        ``LangGraphEngine()`` already gets and what lets such a graph interrupt at all.
+
+        The configured saver is resolved here and not in ``__init__``: ``sqlite``/``postgres``
+        savers live in the ``[durability]`` extra, so a composition root that merely names a
+        backend must not import one until a workflow that needs it actually runs.
+        """
+        durable = spec.metadata.get(DURABLE_KEY)
+        if durable is False:
+            return None
+        if durable is True and self._durable_checkpoint is not None:
+            return resolve_checkpointer(*self._durable_checkpoint)
+        return self._checkpointer
 
     async def _play(
         self,
@@ -242,13 +318,23 @@ class LangGraphEngine(EnginePort):
         (``parse_constant`` catches the ``NaN``/``Infinity`` tokens that ``default`` never
         sees, because those leaves *are* floats): the same fidelity ceiling the previous
         ``str(dict(values))`` had for the whole state, so a graph that completed before does
-        not start failing here. v1's bridge substitutes v1's own encoder, whose pydantic and
-        dataclass branches are what v1's wire showed for such a leaf.
+        not start failing here.
         """
         return json.loads(json.dumps(value, default=self._leaf), parse_constant=str)
 
     def _leaf(self, value: Any) -> Any:
-        """A single value JSON cannot carry, as data."""
+        """A single value JSON cannot carry, as data.
+
+        A pydantic model or a dataclass is a state channel a node legitimately returns, so it
+        reaches a consumer as the object it is rather than as its ``repr``; ``__dict__`` covers
+        the plain object a node built by hand. Everything else is ``str()`` — the ceiling.
+        """
+        if isinstance(value, BaseModel):
+            return value.model_dump()
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            return dataclasses.asdict(value)
+        if hasattr(value, "__dict__"):
+            return value.__dict__
         return str(value)
 
 
@@ -271,4 +357,11 @@ def _to_graph_input(input: Input) -> dict[str, Any]:
     return {"input": "\n".join(texts)}
 
 
-__all__ = ["REPORTER_KEY", "STREAM_WRITE", "STREAM_WRITE_KEY", "LangGraphEngine"]
+__all__ = [
+    "DURABLE_KEY",
+    "REPORTER_KEY",
+    "STREAM_CONFIGURABLE_KEY",
+    "STREAM_WRITE",
+    "STREAM_WRITE_KEY",
+    "LangGraphEngine",
+]

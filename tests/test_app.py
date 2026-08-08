@@ -5,7 +5,7 @@ import sys
 import textwrap
 
 import pytest
-from scripted_model import ScriptedModel, provider_of
+from scripted_model import ScriptedModel, patch_provider, provider_of
 
 AGENT_PY = """
 from pydantic import BaseModel
@@ -111,13 +111,13 @@ def test_the_apps_tenant_matches_the_http_compat_layers(project):
     assert app_module._PRINCIPAL == compat.V1_PRINCIPAL
 
 
-def test_the_apps_structured_output_carrier_matches_the_compat_engines(project):
+def test_the_apps_structured_output_carrier_matches_the_engines(project):
     """Spelled out independently in both places for the same reason the HTTP surface spells
     its own copy out (D10); this is what keeps the two from drifting apart."""
     from agentdeck import app as app_module
-    from agentdeck.v1bridge import engine as compat_engine
+    from agentdeck.adapters.engines.openai_agents import engine as openai_agents_engine
 
-    assert app_module._LEGACY_STRUCTURED_OUTPUT == compat_engine.STRUCTURED_OUTPUT
+    assert app_module._LEGACY_STRUCTURED_OUTPUT == openai_agents_engine.STRUCTURED_OUTPUT
 
 
 def test_run_workflow_is_recorded_in_the_log(project):
@@ -134,8 +134,8 @@ def test_run_agent_is_recorded_and_returns_a_turn_result(project, monkeypatch):
     """``run_agent`` used to hand back the SDK's own ``RunResult`` and write nothing to the
     log; it now does neither — read the run back by its own ``run_id`` to prove it landed.
     """
-    monkeypatch.setattr(
-        "agentdeck.agents.runners.base.OpenAIProvider",
+    patch_provider(
+        monkeypatch,
         provider_of(ScriptedModel(deltas=("hi",), input_tokens=3, output_tokens=4)),
     )
 
@@ -156,7 +156,7 @@ def test_run_agent_is_recorded_and_returns_a_turn_result(project, monkeypatch):
 
 
 def test_chat_is_recorded_and_returns_a_turn_result(project, monkeypatch):
-    monkeypatch.setattr("agentdeck.agents.runners.base.OpenAIProvider", provider_of(ScriptedModel(deltas=("hi",))))
+    patch_provider(monkeypatch, provider_of(ScriptedModel(deltas=("hi",))))
 
     result = asyncio.run(project.chat("Greeter", "s1", "hello"))
 
@@ -175,8 +175,8 @@ def test_chat_is_recorded_and_returns_a_turn_result(project, monkeypatch):
 def test_a_failed_chat_still_leaves_run_failed_in_the_log(project, monkeypatch):
     """The issue's own motivation for this PR, asserted directly: a run that raises is still
     written down, even though nobody read the stream to the end by hand."""
-    monkeypatch.setattr(
-        "agentdeck.agents.runners.base.OpenAIProvider",
+    patch_provider(
+        monkeypatch,
         provider_of(ScriptedModel(deltas=("par",), raises=RuntimeError("boom"))),
     )
 
@@ -191,9 +191,7 @@ def test_a_structured_chat_output_survives_as_validated_data(project, monkeypatc
     """``RunCompleted.output`` can only hold text; v1's compat engine carries a validated
     ``output_type`` result alongside it, and ``chat``'s ``TurnResult`` must still surface it
     as data rather than the stringified JSON the terminal event itself carries."""
-    monkeypatch.setattr(
-        "agentdeck.agents.runners.base.OpenAIProvider", provider_of(ScriptedModel(deltas=('{"greeting": "hi"}',)))
-    )
+    patch_provider(monkeypatch, provider_of(ScriptedModel(deltas=('{"greeting": "hi"}',))))
 
     result = asyncio.run(project.chat("Structured", "s1", "hello"))
 
@@ -206,9 +204,7 @@ def test_chat_stream_yields_canonical_events_and_is_recorded(project, monkeypatc
     declared in the CHANGELOG."""
     from agentdeck.core.events import RunCompleted, TextDelta
 
-    monkeypatch.setattr(
-        "agentdeck.agents.runners.base.OpenAIProvider", provider_of(ScriptedModel(deltas=("Hel", "lo")))
-    )
+    patch_provider(monkeypatch, provider_of(ScriptedModel(deltas=("Hel", "lo"))))
 
     async def _collect():
         return [event async for event in project.chat_stream("Greeter", "s1", "hello")]
@@ -237,9 +233,7 @@ def test_chat_stream_closes_the_runtime_generator_on_abandonment(project, monkey
     session forever: closing only ``chat_stream``'s own frame would abandon the Runtime's
     generator to the GC instead of closing it, the same trap :func:`_turn_result` (the
     non-streamed methods) avoids by draining to a natural end rather than returning early."""
-    monkeypatch.setattr(
-        "agentdeck.agents.runners.base.OpenAIProvider", provider_of(ScriptedModel(deltas=("Hel", "lo")))
-    )
+    patch_provider(monkeypatch, provider_of(ScriptedModel(deltas=("Hel", "lo"))))
 
     async def _scenario():
         stream = project.chat_stream("Greeter", "s1", "hello")
@@ -260,7 +254,7 @@ def test_chat_and_chat_stream_share_one_session(project, monkeypatch):
     """Same guarantee the old ``HeadlessRunner``-backed methods gave: one ``session_id`` is
     one conversation whichever App method ran the turn."""
     model = ScriptedModel(deltas=("hi",))
-    monkeypatch.setattr("agentdeck.agents.runners.base.OpenAIProvider", provider_of(model))
+    patch_provider(monkeypatch, provider_of(model))
 
     async def _scenario():
         async for _ in project.chat_stream("Greeter", "s1", "first"):
@@ -277,7 +271,7 @@ def test_chat_and_chat_stream_share_one_session(project, monkeypatch):
 def test_run_agent_works_without_an_explicit_load(project, monkeypatch):
     """The recorded path has to be at least as convenient as the one it replaces: a quick
     script calling ``App().run_agent(...)`` must not have to remember ``load()`` first."""
-    monkeypatch.setattr("agentdeck.agents.runners.base.OpenAIProvider", provider_of(ScriptedModel(deltas=("hi",))))
+    patch_provider(monkeypatch, provider_of(ScriptedModel(deltas=("hi",))))
 
     assert project._runtime is None  # nothing has called load() yet
     result = asyncio.run(project.run_agent("Greeter", "hello"))
@@ -300,12 +294,12 @@ def test_pause_and_resume_reach_the_runtime_this_app_composed(project, monkeypat
     is that no test wires the port itself: if the composition root stopped building one, or
     ``App`` reached for a different one, the pause below would go nowhere.
     """
-    from scripted_model import ScriptedModel, provider_of
+    from scripted_model import ScriptedModel, patch_provider, provider_of
 
     from agentdeck.core.content import coerce_input
     from agentdeck.surfaces.serve.compat import run_context
 
-    monkeypatch.setattr("agentdeck.agents.runners.base.OpenAIProvider", provider_of(ScriptedModel(deltas=("hi",))))
+    patch_provider(monkeypatch, provider_of(ScriptedModel(deltas=("hi",))))
     project.load()
     ctx = run_context("s-control")  # exactly what the chat route builds for a request
 
@@ -326,7 +320,7 @@ def test_pause_and_resume_reach_the_runtime_this_app_composed(project, monkeypat
 
 @pytest.fixture(autouse=True)
 def _reset_mcp_lifecycle():
-    from agentdeck.agents.mcp.lifecycle import MCPLifecycle
+    from agentdeck.adapters.tools.mcp.lifecycle import MCPLifecycle
 
     yield
     MCPLifecycle.reset()
@@ -366,7 +360,7 @@ def test_open_close_lifecycle(project):
 def test_only_the_app_that_started_mcp_shuts_it_down(project, monkeypatch):
     """The MCP registry is process-wide: a bare App must not tear down someone else's servers."""
     from agentdeck import App
-    from agentdeck.agents.mcp.lifecycle import MCPLifecycle
+    from agentdeck.adapters.tools.mcp.lifecycle import MCPLifecycle
 
     calls = []
 
@@ -389,7 +383,8 @@ def test_only_the_app_that_started_mcp_shuts_it_down(project, monkeypatch):
 def test_injected_session_factory_is_used_and_closed_once(project, monkeypatch):
     """The DI seam bypasses `from_settings` and `aclose()` closes the injection exactly once."""
     from agentdeck import App
-    from agentdeck.runtime.sessions import SessionFactory
+    from agentdeck import app as app_module
+    from agentdeck.adapters.engines.openai_agents.sessions import SessionFactory
 
     def boom(_settings):
         raise AssertionError("from_settings must not be called when a factory is injected")
@@ -400,7 +395,10 @@ def test_injected_session_factory_is_used_and_closed_once(project, monkeypatch):
     async def scenario() -> App:
         async with App.open(session_factory=fake) as app:
             assert app.session_factory is fake
-            assert app.session_for("s1") is fake.sessions["s1"]
+            # Tenant-scoped, because the engine's own store is what mints it now: two tenants
+            # are free to pick the same session id, and an unprefixed key would hand them one
+            # conversation. Same key whichever entry point the turn arrived through.
+            assert app.session_for("s1") is fake.sessions[f"{app_module._TENANT}:s1"]
         return app
 
     app = asyncio.run(scenario())

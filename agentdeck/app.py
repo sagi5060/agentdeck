@@ -38,18 +38,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agents import SQLiteSession
-
-from agentdeck.agents.mcp.lifecycle import MCPLifecycle
+from agentdeck.adapters.engines.langgraph import LangGraphEngine
+from agentdeck.adapters.engines.openai_agents import ExecutionStore, OpenAIAgentsEngine, SessionFactory
+from agentdeck.adapters.tools.mcp.lifecycle import MCPLifecycle
 from agentdeck.agents.registry import AgentRegistry
-from agentdeck.composition import build_runtime, v1_engines
+from agentdeck.composition import (
+    build_runtime,
+    resolve_agent_sandbox,
+    resolve_checkpoint,
+    resolve_run_settings,
+    resolve_workflow_workspace,
+)
 from agentdeck.core.content import DataBlock, TextBlock, coerce_input
 from agentdeck.core.context import RunContext
 from agentdeck.core.control import Signal
 from agentdeck.core.events import Custom, NodeUpdated, RunCompleted, RunInterrupted
 from agentdeck.errors import ConfigError, NotFoundError
 from agentdeck.runtime.registry import PROJECT_DIR, _package_dir, mount_project_dir
-from agentdeck.runtime.sessions import SessionFactory
 from agentdeck.runtime.settings import Settings, get_settings
 from agentdeck.skills.bundle import SkillRegistry
 from agentdeck.workflows.interrupts import interrupt_result
@@ -76,11 +81,12 @@ if TYPE_CHECKING:
 _TENANT = "local"
 _PRINCIPAL = "user:local"
 
-# v1's compat engine (``agentdeck/v1bridge/engine.py``) namespaces a validated
-# ``output_type`` result here instead of putting it on ``RunCompleted.output`` as a
-# ``DataBlock`` (what the canonical engine does), because v1's own wire can only carry text.
-# Spelled out rather than imported, the same reason ``surfaces/serve/compat.py`` spells out
-# its own copy: this fallback, and the pin test next to it, go away with v1bridge.
+# The openai-agents engine namespaces a validated ``output_type`` result here as well as
+# putting it on ``RunCompleted.output`` as a ``DataBlock``, because v1's wire can only carry
+# text and the HTTP surface reads the custom event to build it. Spelled out rather than
+# imported, the same reason ``surfaces/serve/compat.py`` spells out its own copy: a facade
+# that imported an adapter would invert the direction the wiring depends on, and a pinned
+# test keeps the two equal.
 _LEGACY_STRUCTURED_OUTPUT = "openai_agents.structured_output"
 
 
@@ -208,7 +214,7 @@ class App:
     # `from_settings`'s real Redis client entirely.
     session_factory: SessionFactory | None = None
     inventory: dict[str, list[str]] = field(init=False, default_factory=dict)
-    _local_sessions: dict[str, Session] = field(init=False, default_factory=dict)
+    _sessions: ExecutionStore = field(init=False)
     _closed: bool = field(init=False, default=False)
     _started_mcp: bool = field(init=False, default=False)
     _runtime: Runtime | None = field(init=False, default=None)
@@ -220,6 +226,9 @@ class App:
         self.skills = SkillRegistry((_package_dir(package) or Path(PROJECT_DIR)) / "skills")
         if self.session_factory is None:
             self.session_factory = SessionFactory.from_settings(self.settings.session)
+        # One conversation memory for this process, whether the turn arrived here or through
+        # HTTP: both play on the Runtime below, so both reach the engine's own store.
+        self._sessions = ExecutionStore(self.session_factory)
 
     @property
     def settings(self) -> Settings:
@@ -272,7 +281,19 @@ class App:
         }
         # One assembly seam, one caller: everything this App hands a surface comes from
         # `build_runtime`, so a second front door adds a caller instead of a second wiring.
-        self._runtime = build_runtime(engines=v1_engines(self.session_for, self.workflows.get))
+        self._runtime = build_runtime(
+            engines=(
+                OpenAIAgentsEngine(
+                    self._sessions,
+                    settings=resolve_run_settings(),
+                    sandbox=resolve_agent_sandbox(),
+                ),
+                LangGraphEngine(
+                    durable_checkpoint=resolve_checkpoint(),
+                    workspace=resolve_workflow_workspace(),
+                ),
+            )
+        )
         return self.inventory
 
     def _ensure_runtime(self) -> Runtime:
@@ -404,10 +425,13 @@ class App:
     def session_for(self, session_id: str) -> Session:
         """Conversation memory for ``session_id`` — Redis when ``AGENTDECK_SESSION_REDIS_URL``
         is set, otherwise an in-process SQLite session (dev/test fallback, lost on exit).
+
+        The engine's own store, not a second one: a turn started here and a turn started over
+        HTTP have to land in the same conversation, and they only do if there is one store and
+        one key scheme. The key is tenant-scoped, which is why this goes through a context
+        rather than the bare id.
         """
-        if self.session_factory is not None:
-            return self.session_factory.session_for(session_id)
-        return self._local_sessions.setdefault(session_id, SQLiteSession(session_id))
+        return self._sessions.session_for(_new_context(session_id))
 
     async def pause_run(self, run_id: str, reason: str | None = None) -> bool:
         """Ask the run to stop at its next safe point, and record why.
@@ -501,8 +525,7 @@ class App:
                 # queued sink emits die with the event loop otherwise, losing the last
                 # few audit/cost events of the process
                 await self._runtime.drain()
-            if self.session_factory is not None:
-                await self.session_factory.aclose()
+            await self._sessions.aclose()
         finally:
             # the MCP registry is process-wide: only tear it down if this App started it
             if self._started_mcp:

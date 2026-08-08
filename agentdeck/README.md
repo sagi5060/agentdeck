@@ -294,7 +294,7 @@ for definitions and the [main README](../README.md#configuration) for the
 env-var reference.
 
 ```python
-from agentdeck.runtime import get_settings
+from agentdeck.runtime.settings import get_settings
 
 s = get_settings()  # cached
 s.openai.model  # "cyankiwi/..."

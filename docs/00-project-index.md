@@ -76,11 +76,22 @@ Documents were written in conversation order and later ones refine earlier ones.
     M0 finish: demo script · falsifier review (GO) ·
         schema-as-built diff · findings note · keep/harden/discard    [doc 6 §6 —
         DONE, `delivery/milestone-0-findings.md`, `scripts/m0_demo.py`, #57]
-NOW ──▶ Epic Story 2 (the seam, full quality — re-sequenced per the
-        findings note) → Story 3+3b ∥ Story 4 → Story 5 (ACP)
-    ──▶ v2.0 release + epic demo (one agent, three surfaces)
-    ──▶ v2.1 batteries → v2.2 rooms & reach → v2.3 operate          [PRD §6]
+    Epic Story 2 (the seam, full quality — re-sequenced per the
+        findings note) → v2.0.0 tagged 2026-08-06
+NOW ──▶ v3.0.0 the cutover: phases 0–3 done on `feat/v3-cutover`;
+        phase 4 (`authoring/`) blocked on the entry-point ruling      [#88 —
+        plan: `delivery/plan-v2-cutover.md`, brief:
+        `delivery/decision-v3-entry-point.md`]
+    ──▶ v3.1 batteries → v3.2 rooms & reach → v3.3 operate          [PRD §6]
 ```
+
+**Amendment 2026-08-08.** v3.0.0 was not in this order when it was written: the epic
+planned v2.1 next. `plan-v2-cutover.md` ruling 1 (v1's public API is dropped, not facaded)
+makes the next release breaking, so the batteries train renumbers behind it — v2.1 → v3.1,
+and so on. Nothing about the *contents* of those releases changed, only their numbers.
+GitHub milestones mirror this exactly: `v3.0.0 — one way to work` (the cutover plus the
+release hygiene that only makes sense against the surface being frozen), `v3.1 — batteries`
+(additive on the frozen API), and `docs-site` (parallel, never release-blocking).
 
 Note the relationship between skeleton and epic: Milestone 0 *is* Phase 1 plus a crude
 Phase 2/3 slice. After go/no-go, epic Story 2 hardens the skeleton's adapters and Runtime

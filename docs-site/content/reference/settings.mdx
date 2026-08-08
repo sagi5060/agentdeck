@@ -16,7 +16,6 @@ OpenAI-compatible endpoint configuration.
 | `OPENAI_MODEL` | `str` | *required* | Model name passed to the host Agents SDK runner. No default — always required. |
 | `OPENAI_API_KEY` | `str` | `''` | API key for the endpoint. What empty does depends on `ca_bundle`: unset (the common case), the OpenAI client falls through to its own `OPENAI_API_KEY` process-env lookup and errors on the first model call if that's empty too; with `ca_bundle` set, the empty value is passed straight through instead and just sends no Authorization header — the self-hosted/corporate-CA case doesn't need a placeholder value the way the common path does. |
 | `OPENAI_BASE_URL` | `str` | `''` | OpenAI-compatible endpoint base URL. Empty uses the SDK default, api.openai.com. |
-| `OPENAI_TRACING_API_KEY` | `str` or `None` | `None` | Legacy OpenAI-native tracing key. Not read anywhere in the current codebase — host tracing runs through Langfuse/OpenInference (`agentdeck.runtime.observability`) instead; kept as a field for backward compatibility with any config still setting it. |
 | `OPENAI_CA_BUNDLE` | `str` | `''` | Path to a CA/certificate bundle for verifying the endpoint's TLS certificate. Empty uses the system's default trust store. |
 
 ## `RunnerSettings`

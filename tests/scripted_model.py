@@ -177,4 +177,24 @@ def provider_of(model: Model) -> type:
     return _Provider
 
 
-__all__ = ["MODEL_NAME", "ScriptedModel", "provider_of"]
+PROVIDER_TARGETS = (
+    # v1's runner glue, still what an AgentNode and BaseAgent.run configure a turn through
+    "agentdeck.agents.runners.base.OpenAIProvider",
+    # the openai-agents adapter, which is what every Runtime-played turn configures through
+    "agentdeck.adapters.engines.openai_agents.runconfig.OpenAIProvider",
+)
+
+
+def patch_provider(monkeypatch: Any, provider: type) -> None:
+    """Point every place a run's model provider is built at ``provider``.
+
+    Two places, because two paths still resolve a run config: the Runtime plays a turn
+    through the adapter, while a workflow node driving an agent of its own still goes
+    through v1's runner. A test that patched only one would pass while the other reached
+    for a real endpoint.
+    """
+    for target in PROVIDER_TARGETS:
+        monkeypatch.setattr(target, provider)
+
+
+__all__ = ["MODEL_NAME", "PROVIDER_TARGETS", "ScriptedModel", "patch_provider", "provider_of"]

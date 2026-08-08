@@ -10,6 +10,7 @@ is in :mod:`agentdeck.core.status`.
 
 from agentdeck.core.ports.control import ControlPort
 from agentdeck.core.ports.engine import EnginePort
+from agentdeck.core.ports.sandbox import ExecResult, SandboxPort
 from agentdeck.core.ports.sink import EventSinkPort
 from agentdeck.core.ports.store import EventStorePort, RunSummary, SessionClaim
 from agentdeck.core.ports.tools import ToolSet, ToolSourcePort
@@ -19,7 +20,9 @@ __all__ = [
     "EnginePort",
     "EventSinkPort",
     "EventStorePort",
+    "ExecResult",
     "RunSummary",
+    "SandboxPort",
     "SessionClaim",
     "ToolSet",
     "ToolSourcePort",
