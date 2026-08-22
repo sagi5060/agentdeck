@@ -1403,6 +1403,10 @@ class Run:
         claimed, so the run stays answerable: an answer the log cannot hold would resume the run on
         a value no replay and no other process could reproduce.
 
+        An ask that named ``options`` refuses anything outside them on the same terms; an ask that
+        named none takes whatever it is given and hands it to the body, which is the only thing
+        that can judge a free-form answer.
+
         ``value`` is resupplied against the context :meth:`Runs.start` was given, not
         recovered: the interrupted run's own copy was never written to the log, so a node that
         read it before the interrupt reads ``None`` on this replay if this handle has none

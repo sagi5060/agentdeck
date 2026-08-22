@@ -1788,6 +1788,21 @@ are written for someone using the package: what changed, and what to do about it
 
 The current release is **v5.0.0**. Earlier releases are listed at the bottom.
 
+## Unreleased
+
+### Fixed
+
+- **Correction to 5.0.0: no executor is named `"langgraph"`.** The "engine port is `Executor`"
+  entry below lists `LangGraphEngine` becoming `LangGraphExecutor` and keeps `"langgraph"` among
+  the wire values. Both went with the engine in that same release; the executors a 5.x deck names
+  are `"native"`, `"openai-agents"` and `"stub"`.
+- **Known Issues no longer documents removed machinery.** The restart entry named
+  `AGENTDECK_CHECKPOINT`, a setting 5.0 removed along with the checkpointer, and one row described
+  a graph `interrupt()`. Both are gone from [Known Issues](/resources/known-issues).
+- **`run.answer()` says what an ask without options does with the value.** An ask that named
+  `options` refuses anything outside them; one that named none hands the value to the body, which
+  is the only thing that can judge it. `PendingRun.invocable` now says why the name is general.
+
 ## v5.0.0
 
 *Released 2026-08-22.*
@@ -1994,20 +2009,6 @@ check what the model is actually receiving.
 &nbsp;→ [#251](https://github.com/agentdecksdk/agentdeck/issues/251), folded into
 [#250](https://github.com/agentdecksdk/agentdeck/issues/250), which did not implement this half
 
-## Defaults that will trap you
-
-### Approvals disappear on restart, under the shipped defaults
-
-`AGENTDECK_EVENTS` defaults to `memory://` while `AGENTDECK_CHECKPOINT` defaults to durable
-SQLite. `deck.runs.list(status=RunStatus.WAITING_ANSWER)` reads the event log; the timer path
-reads the checkpointer. After a restart the two disagree, and a parked approval can never be
-answered because the listing returns empty.
-
-**Until it is fixed:** set `AGENTDECK_EVENTS` to a durable store  -  `sqlite://`, `postgresql://`
-or `redis://`  -  in anything that outlives one process. See
-[Settings](/reference/settings).
-&nbsp;→ [#212](https://github.com/agentdecksdk/agentdeck/issues/212)
-
 ## Rough edges
 
 Not silent, not traps  -  just things that will cost you a few minutes.
@@ -2015,7 +2016,6 @@ Not silent, not traps  -  just things that will cost you a few minutes.
 | What | Issue |
 |---|---|
 | `run()`'s return type makes the documented interrupt idiom fail a type checker | [#231](https://github.com/agentdecksdk/agentdeck/issues/231) |
-| A graph `interrupt()` names no options, so `answer()` takes whatever it is given and the node owns interpreting it. A native `ctx.ask(options=...)` is validated instead | [#235](https://github.com/agentdecksdk/agentdeck/issues/235) |
 | The CLI can send signals but cannot read anything  -  no inbox, no run view | [#256](https://github.com/agentdecksdk/agentdeck/issues/256) |
 | `Deck.asgi()` cannot serve an agent whose tools declare a `ToolCtx` | [#227](https://github.com/agentdecksdk/agentdeck/issues/227) |
 
