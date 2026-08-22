@@ -110,6 +110,9 @@ class PendingRun:
     run_id: str
     session_id: str | None
     invocable: str
+    """The catalog name of what this run is waiting inside. General because one catalog holds
+    agents, workflows and tools, so every run names its target the same way whatever kind it is."""
+
     thread_id: str
     payload: dict[str, Any]
     reason: InterruptReason = "human"

@@ -19,7 +19,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # An `edited` run skips the two heavy jobs, so cancelling for it strands `Python 3.12` and
+  # `Python 3.13` at `cancelled` with no later event to replace them (#444).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
 
 jobs:
   test:

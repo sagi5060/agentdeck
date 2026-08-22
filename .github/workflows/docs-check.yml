@@ -11,6 +11,11 @@ concurrency:
   group: docs-check-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# `Build documentation` is a required context, and a cancelled run leaves it absent, which branch
+# protection cannot tell from a failure. The next `synchronize` normally replaces it; when it stays
+# absent, close and reopen the PR, which fires a genuine `pull_request` event. `workflow_dispatch`
+# does not clear it: GitHub does not associate a dispatch run with a pull request (#408).
+
 jobs:
   build:
     name: Build documentation
