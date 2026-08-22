@@ -46,12 +46,25 @@ class _Channel:
     def __init__(self) -> None:
         self._out: asyncio.Queue[KnownPayload | None] = asyncio.Queue()
         self._answer: asyncio.Future[Any] | None = None
+        # Held alongside the future only so the refusal below can name what already owns the slot.
+        self._suspended_on: KnownPayload | None = None
 
     async def emit(self, payload: KnownPayload) -> None:
         await self._out.put(payload)
 
     async def suspend(self, payload: KnownPayload) -> Any:
         """Hand out the payload that suspends the run, then wait here for what answers it."""
+        if (parked := self._suspended_on) is not None:
+            # Assigning over a live slot is what #414 was: the branch already waiting kept waiting
+            # on a future nothing could complete. This leaves that future alone, so the run stays
+            # answerable and the refusal travels out with the body instead.
+            raise ConfigError(
+                f"this run is already suspended on {_named(parked)}, so "
+                f"{_named(payload)} cannot suspend it too: one run parks on one payload at a time, "
+                f"and a second would replace the first and never be answered (agentdeck #414). "
+                f"Suspend in sequence, or give each one a child run of its own."
+            )
+        self._suspended_on = payload
         self._answer = asyncio.get_running_loop().create_future()
         await self._out.put(payload)
         return await self._answer
@@ -65,10 +78,20 @@ class _Channel:
 
     def wake(self, value: Any) -> None:
         """Give the parked body its answer. ``None`` is what a lifted pause carries."""
-        answer, self._answer = self._answer, None
+        answer, self._answer, self._suspended_on = self._answer, None, None
         if answer is None or answer.done():
             raise ConfigError("this run is not parked on anything: nothing is waiting to be answered.")
         answer.set_result(value)
+
+
+def _named(payload: KnownPayload) -> str:
+    """How the refusal above names a suspending payload: its question, or else its kind.
+
+    ``ctx.safepoint()`` parks on the same slot as ``ctx.ask()``, so this cannot assume a question
+    is there to quote.
+    """
+    question = getattr(payload, "payload", {}).get("question")
+    return repr(question) if question else f"a {payload.kind} payload"
 
 
 @dataclass(slots=True)

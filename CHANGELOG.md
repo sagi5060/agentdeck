@@ -8,6 +8,19 @@ Fixed / Security` order  -  and are written to be attached to a release as-is.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Deck(agents=[...])` refuses a raw Agents SDK agent at construction.** It was admitted
+  silently, because a catalog entry only had to have a `.name`, and `build()` then died on
+  `AttributeError: 'Agent' object has no attribute 'skills'`. The refusal is a `ConfigError`
+  naming the object and pointing at `handoffs=`, which does take a raw SDK agent.
+- **A second concurrent suspension is refused instead of losing the branch that was already
+  waiting.** One run parks on one payload at a time, so two `ctx.ask(...)` calls raced under
+  `asyncio.gather` overwrote the first branch's future and left it waiting for the life of the run
+  with no error and no event. `run.answer()` now raises `ConfigError` naming both payloads and the
+  run fails, where it previously succeeded and left the run stuck. `ctx.parallel(...)` already
+  refused this at the call.
+
 ## [5.0.0] - 2026-08-22
 
 ### Added

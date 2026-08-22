@@ -349,6 +349,31 @@ async def test_a_parked_body_this_process_lost_says_so() -> None:
         assert ran == ["ran"]
 
 
+async def test_a_second_concurrent_ask_is_refused_rather_than_orphaning_the_first() -> None:
+    """agentdeck #414: one run parks on one payload at a time, so a second ``ask`` raced against
+    the first used to overwrite its future and leave that branch waiting forever. ``ctx.parallel``
+    refuses this at the call; a raw ``asyncio.gather`` reaches ``suspend`` itself, so the channel
+    refuses it there. The refusal travels with the body, which is why it surfaces at the answer."""
+
+    @workflow
+    async def two_questions(ctx: WorkflowCtx) -> list[str]:
+        async def branch(question: str) -> str:
+            return str(await ctx.ask(question))
+
+        return list(await asyncio.gather(branch("a?"), branch("b?")))
+
+    async with Deck(workflows=[two_questions]) as deck:
+        run = await deck.runs.start("two_questions", None)
+        await _settles(run, RunStatus.WAITING_ANSWER)
+
+        with pytest.raises(ConfigError, match="one payload at a time") as exc_info:
+            await asyncio.wait_for(run.answer("yes"), timeout=5)
+        message = str(exc_info.value)
+        assert "'a?'" in message
+        assert "'b?'" in message
+        assert await run.status() is RunStatus.FAILED
+
+
 async def _settles(run: Any, status: RunStatus) -> None:
     """Wait for the run to reach ``status``. The body runs in its own task, so a test that
     asserted immediately would be racing it."""

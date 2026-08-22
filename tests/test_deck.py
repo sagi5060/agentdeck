@@ -15,6 +15,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from agents import Agent as SDKAgent
 from agents import WebSearchTool, function_tool
 from pydantic import BaseModel
 
@@ -488,6 +489,16 @@ def test_agent_tool_that_is_not_callable_at_all_fails_build():
     with pytest.raises(ConfigError, match="Greeter") as exc_info:
         deck.build()
     assert "neither a callable nor an Agents SDK tool object" in str(exc_info.value)
+
+
+def test_a_raw_sdk_agent_in_the_catalog_is_refused_at_construction():
+    """agentdeck #451: a raw SDK agent has a ``.name``, so the catalog admitted it and ``build()``
+    died on ``.skills``. It is legitimate as a handoff target, which is where the refusal points."""
+    raw = SDKAgent(name="raw", instructions="hi")
+
+    with pytest.raises(ConfigError, match="raw") as exc_info:
+        Deck(agents=[raw])
+    assert "handoffs=" in str(exc_info.value)
 
 
 def test_agent_tool_wrapped_with_function_tool_builds_cleanly():

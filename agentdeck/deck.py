@@ -398,12 +398,21 @@ async def _aclose_store(store: EventStorePort) -> None:
         store.close()  # ty: ignore[call-non-callable]  -  same reason
 
 
-def _named_mapping(items: Sequence[Any], arg_name: str) -> Mapping[str, Any]:
+def _named_mapping(items: Sequence[Any], arg_name: str, expected: type | None = None) -> Mapping[str, Any]:
     # Mirrors PluginRegistry's own collision rule: `{a.name: a for a in agents}` would collapse
     # a duplicate to whichever came last with no error, the same silent shadow this rule refuses
     # on the discovery path.
     found: dict[str, Any] = {}
     for item in items:
+        if expected is not None and not isinstance(item, expected):
+            # Anything with a `.name` used to reach the catalog and die at `.skills` in build()
+            # (#451). Checked before the name is read, so a bare string is refused here too.
+            raise ConfigError(
+                f"Deck({arg_name}=...) takes agentdeck {expected.__name__} declarations, not the "
+                f"{type(item).__module__}.{type(item).__name__} {getattr(item, 'name', item)!r}. An "
+                f"Agents SDK agent is legitimate as a handoff target instead: "
+                f"Agent(name=..., handoffs=[...])."
+            )
         if item.name in found:
             raise ConfigError(
                 f"two entries in {arg_name}= both use the name {item.name!r}; one name is one "
@@ -538,7 +547,7 @@ class Deck:
         # the one-Deck-per-process refusal can name it.
         _project_path: Path | None = None,
     ) -> None:
-        self._agents: Mapping[str, Agent] = _named_mapping(agents, "agents")
+        self._agents: Mapping[str, Agent] = _named_mapping(agents, "agents", Agent)
         self._workflows: Mapping[str, NativeDefinition] = _named_mapping(workflows, "workflows")
         self._skills_obj = _coerce_skills(skills)
         self._mcp_obj = _coerce_mcp(mcp)
