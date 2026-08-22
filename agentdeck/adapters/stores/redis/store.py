@@ -36,6 +36,7 @@ from urllib.parse import quote
 from redis.asyncio import Redis
 from redis.exceptions import RedisError, WatchError
 
+from agentdeck.adapters.stores import _refuse_if_cancelled
 from agentdeck.core.events import Event
 from agentdeck.core.ports import EventStorePort, RunSummary, SessionClaim
 from agentdeck.core.status import LIFECYCLE_KINDS, STATES, can_resume, status_of
@@ -195,6 +196,10 @@ class RedisEventStore(EventStorePort):
             return []
 
         async def _attempt(pipe: Pipeline) -> list[Event]:
+            life_key = self._life_key(ctx.namespace_key, ctx.run_id)
+            await pipe.watch(life_key)
+            life = await pipe.get(life_key)
+            _refuse_if_cancelled(status_of([Event.model_validate(json.loads(life))] if life else []), ctx)
             events = await self._stamp(pipe, payloads, ctx, origin)
             pipe.multi()
             self._queue_writes(pipe, ctx.namespace_key, events)

@@ -80,6 +80,14 @@ class EventStorePort(ABC):
         the backend uses to make the write indivisible. Must return only once they are durable,
         because the Runtime yields to consumers immediately after.
 
+        Raises ``RunStateError`` for a run that is already ``CANCELLED``, decided inside the same
+        indivisible step as the write. A cancel is written from outside a run whose task is still
+        alive, so one of that run's own appends can already be suspended in here when the terminal
+        event lands, and the write step is the only place left that can still stop it.
+
+        A takeover's ``run.failed`` deliberately refuses nothing: it is written for a run only
+        *believed* dead, and one that turns out to be alive goes on writing (ADR-D11 §5).
+
         Run identity comes from ``ctx`` alone. The one write that belongs to a *different* run  -
         the terminal event a takeover stamps for a run it stepped over  -  passes a ``ctx`` built
         for that run, from the event :class:`SessionClaim` handed back. There is no override

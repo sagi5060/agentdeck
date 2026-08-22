@@ -1,7 +1,7 @@
 # ADR-D11  -  The store assigns `seq` and `ts`
 
 **Status:** accepted
-**Date:** 2026-08-08 · **Amended:** 2026-08-08 (#149) · **Relates to:** ADR-D5, design doc §4.2 ·
+**Date:** 2026-08-08 · **Amended:** 2026-08-08 (#149), 2026-08-22 (#421) · **Relates to:** ADR-D5, design doc §4.2 ·
 §5, `core/ports/store.py`, `runtime/service.py`, coding-standards §6
 **Supersedes:**
 
@@ -129,6 +129,13 @@ decide the run was stale (`memory:74`, `sqlite:199`, `postgres:250`, all iterati
 `list[tuple[str, Event]]`), and currently throws away. The closer builds that run's own
 `RunContext` from it and calls the ordinary `append`. No foreign addressing, no second query, and
 `claim_start` keeps exactly one job.
+
+**Amended 2026-08-22 (#421): `append` refuses a run that is already `CANCELLED`.** A spent `seq`
+no longer refuses anything, and a cancel is written from outside a run whose task is still alive, so
+one of that run's writes can already be suspended inside `append` when the terminal event lands. The
+condition is folded into each backend's own write step, beside the `seq` read it already makes there.
+The takeover's `run.failed` above deliberately seals nothing: it is written for a run only *believed*
+dead, and one that turns out to be alive goes on writing and may reclaim its own session.
 
 **The two claims stay, as named methods.** They are not extra operations  -  they are conditional
 appends, and they are the only place mutual exclusion can live without adding a second piece of

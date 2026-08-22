@@ -326,18 +326,23 @@ class Runtime:
         opening = await self._claim_resume(spec, ctx, value)
         if opening is None:
             return
-        ruling, pending = await self._route(ctx.id, status)
-        if ruling.action is Action.TERMINATE and pending is not None:
-            yield opening
-            yield await self._record(ControlRequested(verb="cancel", reason=pending.reason), spec, ctx)
-            yield await self._record(RunCancelled(reason=pending.reason), spec, ctx)
-            return
-        # Any other ruling plays the run on, including a pause that landed inside the window the
-        # peek left open: the answer is recorded by now, so the run resumes and meets that pause
-        # at its first safe point instead.
-        # Read after the claim, so the ``run.resumed`` carrying the answer is in it: that event
-        # is how the executor learns there is an answer at all, and what it is.
-        history = await self._history(ctx)
+        try:
+            ruling, pending = await self._route(ctx.id, status)
+            if ruling.action is Action.TERMINATE and pending is not None:
+                closing = await self._terminate(spec, ctx, pending.reason)
+                yield opening
+                for event in closing:
+                    yield event
+                return
+            # Any other ruling plays the run on, including a pause that landed inside the window
+            # the peek left open: the answer is recorded by now, so the run resumes and meets that
+            # pause at its first safe point instead.
+            # Read after the claim, so the ``run.resumed`` carrying the answer is in it: that
+            # event is how the executor learns there is an answer at all, and what it is.
+            history = await self._history(ctx)
+        except asyncio.CancelledError:
+            await self._abandon_claim(spec, ctx)
+            raise
         stream = executor.execute(spec, opened.input, history, ctx)
         async with aclosing(self._play(opening, stream, spec, ctx, executor, reports)) as resumed:
             async for event in resumed:
@@ -394,18 +399,20 @@ class Runtime:
         opening = await self._claim_resume(spec, run_ctx, None, reason)
         if opening is None:
             return
-        # Read control only after the claim: the claim is what makes this caller the one actor
-        # on the run, so an answer read before it could belong to somebody else's turn.
-        ruling, pending = await self._route(run_ctx.id, summary.status)
-        if ruling.action is Action.TERMINATE and pending is not None:
-            yield opening
-            # No ``control.observed``: that event says the run reached a safe point and acted
-            # there, and this run reached none  -  it was already stopped when the cancel landed.
-            # The request and the effect are the whole honest story of a cancel served here.
-            yield await self._record(ControlRequested(verb="cancel", reason=pending.reason), spec, run_ctx)
-            yield await self._record(RunCancelled(reason=pending.reason), spec, run_ctx)
-            return
-        history = await self._history(run_ctx)
+        try:
+            # Read control only after the claim: the claim is what makes this caller the one actor
+            # on the run, so an answer read before it could belong to somebody else's turn.
+            ruling, pending = await self._route(run_ctx.id, summary.status)
+            if ruling.action is Action.TERMINATE and pending is not None:
+                closing = await self._terminate(spec, run_ctx, pending.reason)
+                yield opening
+                for event in closing:
+                    yield event
+                return
+            history = await self._history(run_ctx)
+        except asyncio.CancelledError:
+            await self._abandon_claim(spec, run_ctx)
+            raise
         stream = executor.execute(spec, opened.input, history, run_ctx)
         async with aclosing(self._play(opening, stream, spec, run_ctx, executor, reports)) as resumed:
             async for event in resumed:
@@ -489,9 +496,39 @@ class Runtime:
         run_ctx, _ = self._bind(replace(ctx, run_id=run_id, session_id=session_id), spec)
         if await self._claim_resume(spec, run_ctx, None, reason) is None:
             return False
-        await self._record(ControlRequested(verb="cancel", reason=reason), spec, run_ctx)
-        await self._record(RunCancelled(reason=reason), spec, run_ctx)
+        await self._terminate(spec, run_ctx, reason)
         return True
+
+    async def _terminate(self, spec: InvocableSpec, ctx: RunContext, reason: str | None) -> list[Event]:
+        """Serve a cancel found pending against a run this caller has just claimed: the request
+        and the effect, in that order, both recorded before either is handed to a consumer.
+
+        No ``control.observed`` between them: that event says the run reached a safe point and
+        acted there, and a run served here reached none  -  it was already stopped when the cancel
+        landed. The request and the effect are the whole honest story of a cancel served this way.
+
+        Both writes land before the caller yields anything, because a consumer that stops reading
+        between them strands the claim exactly as a cancellation across it would (#391).
+        """
+        return [
+            await self._record(ControlRequested(verb="cancel", reason=reason), spec, ctx),
+            await self._record(RunCancelled(reason=reason), spec, ctx),
+        ]
+
+    async def _abandon_claim(self, spec: InvocableSpec, ctx: RunContext) -> None:
+        """Close a run whose resume claim committed and whose play never started.
+
+        The claim flips the run to ``RUNNING`` before there is anything to yield, and every await
+        from there to :meth:`_play` is one a cancellation can land on  -  leaving a run the log says
+        is live with nobody playing it and its session held for a whole staleness window. Recorded
+        rather than shielded, because status is folded from the log: a log saying a run is live
+        while nothing plays it is a log that lies.
+
+        Guarded on ``RUNNING`` because the same span also serves a pending cancel, and that path
+        has already written this run's terminal event (#391).
+        """
+        if await self._store.run_status(ctx) is RunStatus.RUNNING:
+            await self._close_cancelled(spec, ctx, "cancelled after the resume claim")
 
     async def _play(
         self,
@@ -807,7 +844,11 @@ class Runtime:
                 run_id,
             )
             return
-        if await self._store.run_status(ctx) is not RunStatus.RUNNING:
+        if (status := await self._store.run_status(ctx)) is not RunStatus.RUNNING:
+            # The benign half of the same branch: the run closed itself between the deck giving up
+            # on it and this read, so there is nothing to write  -  said out loud, because the
+            # caller has already logged that it abandoned this run (#419).
+            logger.debug("run %s is %s, not RUNNING; it closed itself and nothing was written", run_id, status)
             return
         session_id, opened = started
         closing = replace(ctx, session_id=session_id)
@@ -1086,8 +1127,9 @@ class Runtime:
         A run :meth:`close_cancelled` abandoned is cancelled here instead, at its next write. The
         check is synchronous and every writer for such a run shares this event loop, so no append
         that starts here can land past the terminal event written for it. One that started before
-        the mark and is still suspended inside the store can, which is #421 and needs the store's
-        own conditional append rather than a second guard above it.
+        the mark and is still suspended inside the store is past this guard already, and the store
+        refuses it there: an append to a ``CANCELLED`` run raises ``RunStateError`` inside the same
+        step that would have written it (#421).
 
         Every terminal event in this class is written here, which is why the delegation roll-up
         hangs off this one call rather than off the engine loop: a run that failed or was

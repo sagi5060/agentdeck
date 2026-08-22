@@ -1135,8 +1135,9 @@ async def test_closing_a_deck_returns_even_when_a_run_never_observes_its_cancell
     """``aclose()`` asks twice and then stops waiting (#412) rather than betting on the run taking
     a cancellation at all, and writes the abandoned run's own ``run.cancelled`` on the way past:
     left open it would be exactly the ghost state ``stale_run_after`` exists to recover. The task
-    stays alive, and the run goes on writing, so no append it starts from there may reach the log
-    past that event.
+    stays alive and the run goes on writing, and nothing it writes may reach the log past that
+    event  -  including the write already suspended inside the store when the event landed, which
+    the guard above the store cannot see and the store itself refuses (#421).
     """
 
     class _UncancellableStore(MemoryEventStore):
@@ -1180,9 +1181,9 @@ async def test_closing_a_deck_returns_even_when_a_run_never_observes_its_cancell
         with contextlib.suppress(BaseException):
             await task
         kinds = [event.kind for event in await store.read_session(_reader_ctx("s1"))]
-        # The one write already suspended inside the store when the run was abandoned still lands
-        # (#421). Every append the run starts after that is refused, so nothing else follows.
-        assert kinds[kinds.index("run.cancelled") + 1 :] == ["text.delta"]
+        # Including the one write already suspended inside the store when the run was abandoned:
+        # the store refuses it on the way out, so ``run.cancelled`` is the log's last word (#421).
+        assert kinds[kinds.index("run.cancelled") + 1 :] == []
     finally:
         store.release.set()
         if task is not None:

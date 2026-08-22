@@ -24,6 +24,7 @@ import psycopg
 from psycopg import errors as pg_errors
 from psycopg import sql
 
+from agentdeck.adapters.stores import _refuse_if_cancelled
 from agentdeck.core.events import Event
 from agentdeck.core.ports import EventStorePort, RunSummary, SessionClaim
 from agentdeck.core.status import LIFECYCLE_KINDS, STATES, can_resume, status_of
@@ -237,6 +238,8 @@ class PostgresEventStore(EventStorePort):
         async def _work(conn: Connection) -> list[Event]:
             async with conn.transaction():
                 await self._lock_stream(conn, ctx)
+                last = await self._last_lifecycle_of_run(conn, ctx.namespace_key, ctx.run_id)
+                _refuse_if_cancelled(status_of([last] if last is not None else []), ctx)
                 return await self._stamp_and_insert(conn, list(payloads), ctx, origin)
 
         return await self._run(_work, "append")

@@ -16,18 +16,21 @@ from event_log_checks import check_contiguous, check_terminal
 from never_yields import NeverYields
 from pydantic import ValidationError
 
+from agentdeck.adapters.control.memory import MemoryControlPort
 from agentdeck.adapters.executors.stub import StubExecutor, stub_spec
 from agentdeck.adapters.leases.memory import MemoryLeasePort
 from agentdeck.adapters.stores.memory import MemoryEventStore
 from agentdeck.composition import build_runtime
 from agentdeck.core.content import DataBlock, TextBlock
 from agentdeck.core.context import RunContext
+from agentdeck.core.control import Signal
 from agentdeck.core.events import (
     Event,
     RunCompleted,
     RunFailed,
     RunInterrupted,
     RunPaused,
+    RunResumed,
     RunStarted,
     TextDelta,
     Usage,
@@ -931,6 +934,160 @@ async def test_a_cancellation_during_the_claim_closes_the_run_and_frees_the_sess
             event async for event in runtime.run("Greeter", INPUT, session_id=CTX.session_id, namespace=CTX.namespace)
         ]
         assert next_turn[-1].kind == "run.completed"
+
+
+class _ClaimThenStall(MemoryEventStore):
+    """Commits a resume claim and then hangs on the history read that follows it, which is the
+    window #391 names: the run reads ``RUNNING``, its session is held, and nothing is playing it.
+
+    Disarmed by clearing ``claimed``, so a test can read the log it left behind through the same
+    store that stalled.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.claimed = asyncio.Event()
+
+    async def claim_resume(self, resumed: RunResumed, ctx: RunContext, origin: str) -> Event | None:
+        event = await super().claim_resume(resumed, ctx, origin)
+        if event is not None:
+            self.claimed.set()
+        return event
+
+    async def read_session(self, ctx: RunContext, offset: int = 0, limit: int | None = None) -> list[Event]:
+        if self.claimed.is_set():
+            await asyncio.Event().wait()  # a cancellation is the only way out, which is the point
+        return await super().read_session(ctx, offset, limit)
+
+
+async def test_a_cancellation_after_the_answer_claim_closes_the_run_and_frees_the_session() -> None:
+    """#391's window on :meth:`Runtime.resume`: the claim appended ``run.resumed`` and flipped the
+    run to ``RUNNING``, and the awaits between that and ``_play`` are all a cancellation needs to
+    leave a run the log says is live with nobody playing it.
+    """
+    spec = stub_spec(
+        "Approver",
+        RunInterrupted(interrupt_id="i1", reason="approval", payload={}, thread_id="t1"),
+        DONE,
+        kind=InvocableKind.WORKFLOW,
+    )
+    store = _ClaimThenStall()
+    runtime = Runtime([StubExecutor()], store, {spec.name: spec})
+    parked = [
+        event async for event in runtime.run("Approver", INPUT, session_id=CTX.session_id, namespace=CTX.namespace)
+    ]
+    run_id = parked[0].run_id
+
+    async def _answer() -> None:
+        async for _ in runtime.resume(
+            "Approver", "approved", run_id=run_id, session_id=CTX.session_id, namespace=CTX.namespace
+        ):
+            pass
+
+    answering = asyncio.create_task(_answer())
+    async with asyncio.timeout(WEDGE_TIMEOUT):
+        await store.claimed.wait()
+        answering.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await answering
+        store.claimed.clear()
+
+        logged = await store.read_run(replace(CTX, run_id=run_id))
+        assert [event.kind for event in logged] == ["run.started", "run.interrupted", "run.resumed", "run.cancelled"]
+        assert check_terminal(logged) is None
+        assert logged[-1].payload.reason == "cancelled after the resume claim"
+
+        # And the session is free again, which is what the terminal event bought.
+        next_turn = [
+            event async for event in runtime.run("Approver", INPUT, session_id=CTX.session_id, namespace=CTX.namespace)
+        ]
+        assert next_turn[0].kind == "run.started"
+
+
+async def test_a_cancellation_after_the_resume_claim_closes_the_run_and_frees_the_session() -> None:
+    """The same window on :meth:`Runtime.resume_run`, which #391 requires covered too: a lifted
+    pause claims the same transition through the same store call and has the same span after it.
+    """
+    spec = stub_spec("Chatty", RunPaused(reason="operator"))
+    store = _ClaimThenStall()
+    runtime = Runtime([StubExecutor()], store, {spec.name: spec})
+    paused = [event async for event in runtime.run("Chatty", INPUT, session_id=CTX.session_id, namespace=CTX.namespace)]
+    run_id = paused[0].run_id
+
+    async def _lift() -> None:
+        async for _ in runtime.resume_run(run_id, namespace=CTX.namespace):
+            pass
+
+    lifting = asyncio.create_task(_lift())
+    async with asyncio.timeout(WEDGE_TIMEOUT):
+        await store.claimed.wait()
+        lifting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await lifting
+        store.claimed.clear()
+
+        logged = await store.read_run(replace(CTX, run_id=run_id))
+        assert [event.kind for event in logged] == ["run.started", "run.paused", "run.resumed", "run.cancelled"]
+        assert check_terminal(logged) is None
+        assert logged[-1].payload.reason == "cancelled after the resume claim"
+        assert [event.kind for event in await store.read_session(CTX)] == [event.kind for event in logged]
+
+
+async def test_a_consumer_that_stops_reading_a_served_cancel_still_gets_both_closers_recorded() -> None:
+    """The other half of #391's window: the branch that serves a cancel found pending used to
+    yield between its two closers, so a consumer that stopped reading there left the run with a
+    ``control.requested`` and no terminal event  -  the same stranded claim, from the other end.
+    """
+    spec = stub_spec(
+        "Approver",
+        RunInterrupted(interrupt_id="i1", reason="approval", payload={}, thread_id="t1"),
+        DONE,
+        kind=InvocableKind.WORKFLOW,
+    )
+    store = MemoryEventStore()
+    control = MemoryControlPort()
+    runtime = Runtime([StubExecutor()], store, {spec.name: spec}, control=control)
+    parked = [
+        event async for event in runtime.run("Approver", INPUT, session_id=CTX.session_id, namespace=CTX.namespace)
+    ]
+    run_id = parked[0].run_id
+    # Straight at the port, which is the one route that leaves a cancel pending against a waiting
+    # run: ``Runtime.signal`` claims and terminates such a run itself.
+    await control.signal(replace(CTX, run_id=run_id).id, Signal.CANCEL, "the user closed the tab")
+
+    answering = runtime.resume(
+        "Approver", "approved", run_id=run_id, session_id=CTX.session_id, namespace=CTX.namespace
+    )
+    assert (await anext(answering)).kind == "run.resumed"
+    await answering.aclose()  # and reads no further
+
+    logged = await store.read_run(replace(CTX, run_id=run_id))
+    assert [event.kind for event in logged] == [
+        "run.started",
+        "run.interrupted",
+        "run.resumed",
+        "control.requested",
+        "run.cancelled",
+    ]
+    assert check_terminal(logged) is None
+
+
+async def test_close_cancelled_says_which_status_it_found_when_the_run_closed_itself(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#419's benign half. The caller has already logged that it abandoned this run, so the branch
+    that decides there is nothing to write says which status it found rather than returning bare.
+    """
+    runtime, store = _runtime()
+    played = [
+        event async for event in runtime.run("Greeter", INPUT, session_id=CTX.session_id, namespace=CTX.namespace)
+    ]
+
+    with caplog.at_level(logging.DEBUG, logger="agentdeck.runtime.service"):
+        await runtime.close_cancelled(played[0].run_id, "the deck closed", namespace=CTX.namespace)
+
+    assert f"run {played[0].run_id} is completed, not RUNNING" in caplog.text
+    assert await store.read_session(CTX) == played, "and nothing was written"
 
 
 async def test_a_takeover_whose_bookkeeping_fails_still_leaves_this_turn_runnable(

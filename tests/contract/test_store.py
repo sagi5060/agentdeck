@@ -50,7 +50,7 @@ from agentdeck.core.events import (
 )
 from agentdeck.core.ports import SessionClaim
 from agentdeck.core.status import RunStatus
-from agentdeck.errors import DuplicateKeyError, StoreError
+from agentdeck.errors import DuplicateKeyError, RunStateError, StoreError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Sequence
@@ -614,6 +614,55 @@ async def test_a_second_batch_carries_on_from_where_the_first_stopped(event_stor
 
     later = await _write(event_store, [_completed()], ctx)
     assert [event.seq for event in later] == [2]
+
+
+async def test_an_append_to_a_cancelled_run_is_refused(event_store: EventStorePort) -> None:
+    """A cancel is written from outside the run while its own task is still alive, so the run goes
+    on writing and the store is the last thing that can stop it (#421). The refusal is the state's,
+    so it is a ``RunStateError`` rather than a store failure, and it writes nothing.
+    """
+    ctx = _ctx()
+    await _write(event_store, [_started(), RunCancelled(reason="the deck closed")], ctx)
+
+    with pytest.raises(RunStateError, match="r-1"):
+        await _write(event_store, [TextDelta(message_id="m1", text="late")], ctx)
+
+    assert [event.kind for event in await event_store.read_run(ctx)] == ["run.started", "run.cancelled"]
+
+
+async def test_an_append_racing_the_cancel_lands_before_it_or_not_at_all(event_store: EventStorePort) -> None:
+    """The window opened deliberately rather than waited for: the write and the cancel are handed
+    over together, so on a real store one of them is genuinely in flight when the other commits.
+    Whichever order the store picks, nothing may end up behind the terminal event.
+    """
+    ctx = _ctx()
+    await _write(event_store, [_started()], ctx)
+
+    await asyncio.gather(
+        _write(event_store, [TextDelta(message_id="m1", text="in flight")], ctx),
+        _write(event_store, [RunCancelled(reason="the deck closed")], ctx),
+        return_exceptions=True,  # whichever write lost the race raises, and that is the point
+    )
+
+    kinds = [event.kind for event in await event_store.read_run(ctx)]
+    assert kinds[-1] == "run.cancelled", kinds
+    assert await event_store.run_status(ctx) is RunStatus.CANCELLED
+
+
+async def test_an_append_past_a_taken_over_runs_failure_still_lands(event_store: EventStorePort) -> None:
+    """The carve-out, on every store. A takeover's ``run.failed`` is advisory: it is written for a
+    run only *believed* dead, and one that turns out to be alive goes on writing and may reclaim
+    its own session. Only a cancel seals a log (ADR-D11 §5).
+    """
+    ctx = _ctx()
+    await _write(
+        event_store, [_started(), RunFailed(error_code="cancelled_hard", message="abandoned", retryable=False)], ctx
+    )
+
+    resurrected = await _write(event_store, [_interrupted()], ctx)
+
+    assert [event.seq for event in resurrected] == [2]
+    assert await event_store.run_status(ctx) is RunStatus.WAITING_ANSWER
 
 
 async def _interrupt(event_store: EventStorePort, ctx: RunContext, run_id: str = "r-1") -> None:
